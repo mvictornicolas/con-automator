@@ -10,17 +10,16 @@ class PluginManager:
         self.load_plugins()
 
     def load_plugins(self):
-        """Descobre dinamicamente e carrega os plugins da pasta rpa_modules"""
-        # Itera sobre todos os módulos dentro de rpa_modules
-        for _, module_name, _ in pkgutil.iter_modules(rpa_modules.__path__):
-            module = importlib.import_module(f"rpa_modules.{module_name}")
-            
-            # Encontra as classes que herdam de BaseRPAProvider (ignorando a própria base)
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if issubclass(obj, BaseRPAProvider) and obj is not BaseRPAProvider:
-                    instance = obj()
-                    self.plugins[instance.name] = instance
-                    print(f"[PluginManager] Carregado plugin: {instance.name}")
+        """Carrega os plugins da pasta rpa_modules de forma compativel com PyInstaller"""
+        from rpa_modules.site_consignet import SiteConsignet
+        
+        # Hardcoded registration for PyInstaller
+        plugins_to_load = [SiteConsignet]
+        
+        for obj in plugins_to_load:
+            instance = obj()
+            self.plugins[instance.name] = instance
+            print(f"[PluginManager] Carregado plugin: {instance.name}")
 
     def get_plugin(self, name: str) -> BaseRPAProvider:
         return self.plugins.get(name)

@@ -13,11 +13,14 @@ from core.models import TaskHistory, SiteConfig, GlobalSettings, QueryLog
 from services.data_engine import DataEngine
 from fastapi.responses import JSONResponse
 import api.license as license_manager
+from api.crm import router as crm_router
 
 # Cria tabelas se nÃ£o existirem
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="RPA Automator API")
+
+app.include_router(crm_router, prefix="/api/crm", tags=["CRM"])
 
 @app.middleware("http")
 async def check_license_middleware(request: Request, call_next):
@@ -59,8 +62,15 @@ app.mount("/outputs", StaticFiles(directory="../data/outputs"), name="outputs")
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    # Retorna a interface web SPA diretamente
-    with open("templates/index.html", "r", encoding="utf-8") as f:
+    import sys
+    # Handle PyInstaller _MEIPASS
+    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    # If not running from PyInstaller, it will be the api/ directory, so we go up one level
+    if not hasattr(sys, '_MEIPASS'):
+        base_dir = os.path.dirname(base_dir)
+        
+    template_path = os.path.join(base_dir, "templates", "index.html")
+    with open(template_path, "r", encoding="utf-8") as f:
         return f.read()
 
 @app.get("/api/license/status")
@@ -124,7 +134,14 @@ def execute_rpa_task(task_id: int, plugin_name: str, file_content: bytes, filena
         
         site_config = db.query(SiteConfig).filter(SiteConfig.plugin_name == plugin_name).first()
         config_data = site_config.config_data if site_config else {}
-        preferred_col = config_data.get("tipo_dado") if config_data else None
+        
+        # Sobrescreve com as propriedades originais da tarefa, se existirem
+        if task.convenio:
+            config_data["convenio"] = task.convenio
+        if getattr(task, "tipo_dado", None):
+            config_data["tipo_dado"] = task.tipo_dado
+            
+        preferred_col = config_data.get("tipo_dado")
         
         # 1. Usar o Data Engine para processar o input
         df, cpf_col = DataEngine.process_file_input(file_content, filename, preferred_col)
@@ -136,8 +153,6 @@ def execute_rpa_task(task_id: int, plugin_name: str, file_content: bytes, filena
         
         # 2. Obter plugin e config
         plugin = manager.get_plugin(plugin_name)
-        site_config = db.query(SiteConfig).filter(SiteConfig.plugin_name == plugin_name).first()
-        config_data = site_config.config_data if site_config else {}
         
         def progress_cb(current, total, msg, task_status=None):
             print(f"[Tarefa {task_id}] Progresso: {current}/{total} - {msg}")
@@ -212,6 +227,24 @@ def execute_rpa_task(task_id: int, plugin_name: str, file_content: bytes, filena
         
         def partial_save_cb(current_results):
             DataEngine.merge_results_and_save(df, cpf_col, current_results, output_path)
+            # Sincroniza com a Base de Clientes (CRM) se o CPF existir lá
+            db_session = SessionLocal()
+            try:
+                from core.models import Cliente
+                for res in current_results:
+                    c_cpf = res.get("cpf_real_coletado") or res.get("cpf") or res.get("CPF")
+                    c_margem = res.get("Margem") or res.get("margem") or res.get("margem_calculada") or res.get("Erro") or res.get("erro")
+                    if c_cpf and c_cpf != "Nao encontrado" and "*" not in c_cpf:
+                        # Limpa CPF
+                        cpf_limpo = ''.join(filter(str.isdigit, str(c_cpf))).zfill(11)
+                        cli = db_session.query(Cliente).filter(Cliente.cpf == cpf_limpo).first()
+                        if cli:
+                            cli.margem_calculada = str(c_margem)
+                db_session.commit()
+            except Exception as e:
+                print("Erro ao atualizar CRM:", e)
+            finally:
+                db_session.close()
 
         results = plugin.execute(cpfs_to_process, config_data, progress_callback=progress_cb, get_speed_callback=get_speed_cb, check_rate_limit_callback=check_rate_limit_cb, register_query_callback=register_query_cb, partial_save_callback=partial_save_cb)
         
@@ -269,11 +302,15 @@ async def execute_task(
         f.write(content)
         
     # Cria o registro da tarefa
+    convenio_str = site_config.config_data.get("convenio", "") if site_config.config_data else ""
+    tipo_dado_str = site_config.config_data.get("tipo_dado", "cpf") if site_config.config_data else "cpf"
     task = TaskHistory(
         plugin_name=plugin_name,
         status="pending",
         file_path_input=input_path,
-        speed_multiplier=speed
+        speed_multiplier=speed,
+        convenio=convenio_str,
+        tipo_dado=tipo_dado_str
     )
     db.add(task)
     db.commit()
@@ -393,7 +430,9 @@ def resume_task(task_id: int, background_tasks: BackgroundTasks, db: Session = D
         status='pending',
         file_path_input=filepath,
         total_cpfs=len(df),
-        speed_multiplier=task.speed_multiplier
+        speed_multiplier=task.speed_multiplier,
+        convenio=task.convenio,
+        tipo_dado=getattr(task, "tipo_dado", "cpf")
     )
     db.add(new_task)
     db.commit()
@@ -407,6 +446,32 @@ def resume_task(task_id: int, background_tasks: BackgroundTasks, db: Session = D
         
     return {'status': 'success', 'new_task_id': new_task.id}
 
+@app.get('/api/tasks/{task_id}/results')
+def get_task_results(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(TaskHistory).filter(TaskHistory.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    
+    if not task.file_path_output:
+        return {"data": []}
+        
+    filename = task.file_path_output.split("/")[-1]
+    real_path = os.path.join("../data/outputs", filename)
+    
+    if not os.path.exists(real_path):
+        return {"data": []}
+        
+    import pandas as pd
+    try:
+        try:
+            df = pd.read_csv(real_path, sep=";")
+        except:
+            df = pd.read_csv(real_path, sep=",")
+            
+        df = df.fillna("")
+        return {"data": df.to_dict(orient="records")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 from pydantic import BaseModel

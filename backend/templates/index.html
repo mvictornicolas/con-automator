@@ -18,6 +18,442 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
 
+        function CrmTab({ plugins }) {
+            const [clients, setClients] = useState([]);
+            const [importFiles, setImportFiles] = useState([]);
+            const [convenioInput, setConvenioInput] = useState('');
+            const [selectedCpfs, setSelectedCpfs] = useState(new Set());
+            const [sidebarClient, setSidebarClient] = useState(null);
+            
+            // Filters
+            const [filterStatuses, setFilterStatuses] = useState(new Set());
+            const [filterConvenios, setFilterConvenios] = useState(new Set());
+            const [filterContatoOk, setFilterContatoOk] = useState('todos'); // 'todos', 'sim', 'nao'
+            const [filterTemMargem, setFilterTemMargem] = useState('todos'); // 'todos', 'sim', 'nao'
+            const [filterMargemMin, setFilterMargemMin] = useState('');
+            const [filterLimit, setFilterLimit] = useState(50);
+            const [filterOrderBy, setFilterOrderBy] = useState('updated_at');
+            const [availableConvenios, setAvailableConvenios] = useState([]);
+            const [showFilters, setShowFilters] = useState(false);
+
+            const activeFiltersCount = filterStatuses.size + filterConvenios.size + (filterContatoOk !== 'todos' ? 1 : 0) + (filterTemMargem !== 'todos' ? 1 : 0) + (filterMargemMin ? 1 : 0);
+
+            // Batch query modal
+            const [showBatchModal, setShowBatchModal] = useState(false);
+            const [batchPlugin, setBatchPlugin] = useState(plugins[0]?.name || '');
+            const [batchConvenio, setBatchConvenio] = useState('');
+
+            // Export modal
+            const [showExportModal, setShowExportModal] = useState(false);
+            const [availableColumns, setAvailableColumns] = useState([]);
+            const [selectedExportColumns, setSelectedExportColumns] = useState(new Set());
+            
+            const fetchClients = async () => {
+                const params = new URLSearchParams();
+                params.append('limit', filterLimit);
+                params.append('order_by', filterOrderBy);
+                
+                filterStatuses.forEach(s => params.append('statuses', s));
+                filterConvenios.forEach(c => params.append('convenios', c));
+                
+                if (filterContatoOk !== 'todos') params.append('contato_ok', filterContatoOk);
+                if (filterTemMargem !== 'todos') params.append('tem_margem', filterTemMargem);
+                if (filterMargemMin) params.append('margem_min', filterMargemMin);
+                
+                const res = await fetch(`/api/crm/clients?${params.toString()}`);
+                const data = await res.json();
+                setClients(data.clientes || []);
+            };
+
+            const fetchConvenios = async () => {
+                const res = await fetch('/api/crm/convenios');
+                const data = await res.json();
+                setAvailableConvenios(data.convenios || []);
+            };
+
+            useEffect(() => { fetchClients(); }, [filterStatuses, filterConvenios, filterContatoOk, filterTemMargem, filterMargemMin, filterLimit, filterOrderBy]);
+            useEffect(() => { fetchConvenios(); }, []);
+
+            useEffect(() => {
+                if (plugins.length > 0 && !batchPlugin) {
+                    setBatchPlugin(plugins[0].name);
+                }
+            }, [plugins]);
+
+            const handleImport = async () => {
+                if (!importFiles.length || !convenioInput) {
+                    alert("Selecione os arquivos e digite um convenio."); return;
+                }
+                const fd = new FormData();
+                fd.append('convenio', convenioInput);
+                for(let f of importFiles) fd.append('files', f);
+                
+                await fetch('/api/crm/import', { method: 'POST', body: fd });
+                alert("Importado com sucesso!");
+                setImportFiles([]);
+                setConvenioInput('');
+                fetchClients();
+            };
+
+            const openExportModal = () => {
+                if (selectedCpfs.size === 0) return alert("Selecione clientes para exportar");
+                
+                const baseCols = ['CPF', 'NOME', 'CONVENIO', 'MARGEM_CALCULADA', 'STATUS_CRM', 'DATA_LEMBRETE'];
+                const extraCols = new Set();
+                
+                clients.forEach(c => {
+                    if (selectedCpfs.has(c.cpf) && c.dados_extras) {
+                        Object.keys(c.dados_extras).forEach(k => extraCols.add(k));
+                    }
+                });
+                
+                const allCols = [...baseCols, ...Array.from(extraCols)];
+                setAvailableColumns(allCols);
+                setSelectedExportColumns(new Set(allCols));
+                setShowExportModal(true);
+            };
+
+            const confirmExport = async () => {
+                if (selectedExportColumns.size === 0) return alert("Selecione pelo menos uma coluna para exportar.");
+                
+                const cols = Array.from(selectedExportColumns);
+                try {
+                    const res = await fetch('/api/crm/export', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ cpfs: Array.from(selectedCpfs), columns: cols })
+                    });
+                    const data = await res.json();
+                    if (data.url) {
+                        window.open(data.url, "_blank");
+                        setShowExportModal(false);
+                    }
+                } catch(e) {
+                    alert("Erro de conexão ao exportar");
+                }
+            };
+
+            const handleBatchQuerySubmit = async () => {
+                if (selectedCpfs.size === 0) return alert("Selecione clientes para consultar.");
+                if (!batchPlugin) return alert("Selecione o plugin.");
+                
+                await fetch('/api/crm/query_batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ cpfs: Array.from(selectedCpfs), plugin: batchPlugin, convenio: batchConvenio })
+                });
+                alert("Consulta em lote enviada para a aba Executar!");
+                setShowBatchModal(false);
+            };
+
+            const toggleSelect = (cpf) => {
+                const newSet = new Set(selectedCpfs);
+                if (newSet.has(cpf)) newSet.delete(cpf); else newSet.add(cpf);
+                setSelectedCpfs(newSet);
+            };
+
+            const saveClient = async (cpf, updates) => {
+                await fetch(`/api/crm/clients/${cpf}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(updates)
+                });
+                fetchClients();
+                if (sidebarClient && sidebarClient.cpf === cpf) {
+                    setSidebarClient(prev => ({...prev, ...updates}));
+                }
+            };
+
+            const quickAction = async (e, cpf, status) => {
+                e.stopPropagation();
+                await saveClient(cpf, {status_crm: status});
+            };
+
+            const toggleFilterSet = (setter, setObj, val) => {
+                const newSet = new Set(setObj);
+                if (newSet.has(val)) newSet.delete(val); else newSet.add(val);
+                setter(newSet);
+            };
+
+            return (
+                <div className="bg-white rounded-xl shadow border p-3 flex flex-col flex-1 h-full min-h-[600px] relative overflow-hidden">
+                    {/* Header Controls */}
+                    <div className="flex flex-col gap-2 mb-2 pb-2 border-b">
+                        <div className="flex justify-between items-center">
+                            <div className="flex gap-2 items-center">
+                                <input type="file" multiple accept=".csv,.xlsx" onChange={e => setImportFiles(e.target.files)} className="text-sm border p-1 rounded" />
+                                <input type="text" placeholder="Tag/Convênio da Planilha..." value={convenioInput} onChange={e=>setConvenioInput(e.target.value)} className="border p-1.5 rounded text-sm"/>
+                                <button onClick={handleImport} className="bg-blue-600 text-white px-3 py-1.5 rounded text-sm font-bold shadow-sm hover:bg-blue-700">Importar Dados</button>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={openExportModal} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm font-bold shadow-sm">Exportar Selecionados</button>
+                                <button onClick={() => { if(selectedCpfs.size===0) alert('Selecione!'); else setShowBatchModal(true); }} className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm font-bold shadow-sm">Consultar Robô ({selectedCpfs.size})</button>
+                            </div>
+                        </div>
+
+                        {/* Filters Bar */}
+                        <div className="bg-slate-50 p-3 rounded border text-sm flex flex-col gap-3">
+                            <div className="flex justify-between items-center pb-2 border-b">
+                                <button onClick={() => setShowFilters(!showFilters)} className="font-bold text-gray-700 flex items-center gap-2 hover:text-blue-600 focus:outline-none">
+                                    <svg className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                                    Filtros Avançados
+                                    {activeFiltersCount > 0 && <span className="bg-blue-500 text-white text-[10px] px-2 py-0.5 rounded-full">{activeFiltersCount} ativos</span>}
+                                </button>
+                                <div className="flex gap-4">
+                                    <div className="font-bold text-gray-500 flex gap-2 items-center">
+                                        <label>Ordenar:</label>
+                                        <select value={filterOrderBy} onChange={e=>setFilterOrderBy(e.target.value)} className="border p-1 rounded bg-white font-normal">
+                                            <option value="updated_at">Mais Recentes</option>
+                                            <option value="margem">Maior Margem</option>
+                                        </select>
+                                    </div>
+                                    <div className="font-bold text-gray-500 flex gap-2 items-center">
+                                        <label>Mostrar:</label>
+                                        <select value={filterLimit} onChange={e=>setFilterLimit(Number(e.target.value))} className="border p-1 rounded bg-white font-normal">
+                                            <option value={50}>50</option>
+                                            <option value={100}>100</option>
+                                            <option value={500}>500</option>
+                                            <option value={1000}>1000</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {showFilters && (
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 animate-fade-in mt-2">
+                                    {/* Status */}
+                                    <div>
+                                        <span className="block text-xs font-bold text-gray-500 uppercase mb-1">Status CRM</span>
+                                        <div className="flex flex-col gap-1 max-h-24 overflow-y-auto">
+                                            {['Novo', 'Contatado', 'Venda Realizada', 'Nao Incomodar', 'Arquivado'].map(st => (
+                                                <label key={st} className="flex items-center gap-1 cursor-pointer">
+                                                    <input type="checkbox" checked={filterStatuses.has(st)} onChange={() => toggleFilterSet(setFilterStatuses, filterStatuses, st)}/>
+                                                    {st}
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {/* Convenios */}
+                                    <div>
+                                        <span className="block text-xs font-bold text-gray-500 uppercase mb-1">Convênios</span>
+                                        <div className="flex flex-col gap-1 max-h-24 overflow-y-auto border p-1 rounded bg-white shadow-inner">
+                                            {availableConvenios.length === 0 && <span className="text-gray-400 italic text-xs p-1">Nenhum salvo...</span>}
+                                            {availableConvenios.map(cv => (
+                                                <label key={cv} className="flex items-center gap-1 cursor-pointer truncate p-1 hover:bg-slate-100" title={cv}>
+                                                    <input type="checkbox" checked={filterConvenios.has(cv)} onChange={() => toggleFilterSet(setFilterConvenios, filterConvenios, cv)}/>
+                                                    {cv}
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {/* Contato Atualizado & Margem */}
+                                    <div>
+                                        <span className="block text-xs font-bold text-gray-500 uppercase mb-1">Contato OK?</span>
+                                        <select value={filterContatoOk} onChange={e=>setFilterContatoOk(e.target.value)} className="w-full border p-1 rounded bg-white mb-3 shadow-sm">
+                                            <option value="todos">Qualquer um</option>
+                                            <option value="sim">Sim (Contato Atualizado)</option>
+                                            <option value="nao">Não (Falta Atualizar)</option>
+                                        </select>
+
+                                        <span className="block text-xs font-bold text-gray-500 uppercase mb-1">Possui Margem?</span>
+                                        <select value={filterTemMargem} onChange={e=>setFilterTemMargem(e.target.value)} className="w-full border p-1 rounded bg-white shadow-sm">
+                                            <option value="todos">Qualquer um</option>
+                                            <option value="sim">Sim (Tem valor)</option>
+                                            <option value="nao">Não / Não Encontrado</option>
+                                        </select>
+                                    </div>
+                                    {/* Valor de Margem */}
+                                    <div>
+                                        <span className="block text-xs font-bold text-gray-500 uppercase mb-1">Margem Mínima (R$)</span>
+                                        <input type="number" placeholder="Ex: 500" value={filterMargemMin} onChange={e=>setFilterMargemMin(e.target.value)} className="w-full border p-1 rounded bg-white mb-2 shadow-sm" />
+                                        <p className="text-[10px] text-gray-500 leading-tight">Serão exibidos clientes cuja margem calculada seja maior ou igual ao valor digitado.</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    {/* Data Grid */}
+                    <div className="flex-1 overflow-auto border rounded bg-white">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-slate-100 sticky top-0 shadow-sm z-10">
+                                <tr>
+                                    <th className="px-2 py-1.5 border-b w-8 text-center"><input type="checkbox" onChange={e => {
+                                        if(e.target.checked) setSelectedCpfs(new Set(clients.map(c=>c.cpf)));
+                                        else setSelectedCpfs(new Set());
+                                    }}/></th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">CPF</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">Nome</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">Convênio</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">Margem</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">Status</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase text-center" title="Contato foi atualizado?">Contato OK</th>
+                                    <th className="px-2 py-1.5 border-b font-semibold text-xs text-gray-500 uppercase">Ações Rápidas</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {clients.map(c => {
+                                    const cels = [c.telefone, c.dados_extras?.DDDFONECEL1, c.dados_extras?.DDDFONECEL2, c.dados_extras?.DDDFONECEL3, c.dados_extras?.TELEFONE, c.dados_extras?.CELULAR].filter(Boolean);
+                                    const zap = cels.length > 0 ? cels[0] : null;
+                                    const emails = [c.email, c.dados_extras?.EMAIL, c.dados_extras?.['E-MAIL']].filter(Boolean);
+                                    const mail = emails.length > 0 ? emails[0] : null;
+                                    
+                                    return (
+                                        <tr key={c.cpf} className="hover:bg-blue-50 border-b cursor-pointer transition-colors" onClick={(e) => { if(e.target.type !== 'checkbox' && e.target.tagName !== 'BUTTON' && e.target.tagName !== 'A') setSidebarClient(c); }}>
+                                            <td className="px-2 py-1 text-center" onClick={e=>e.stopPropagation()}><input type="checkbox" checked={selectedCpfs.has(c.cpf)} onChange={() => toggleSelect(c.cpf)}/></td>
+                                            <td className="px-2 py-1 font-mono text-gray-600 text-xs">{c.cpf}</td>
+                                            <td className="px-2 py-1 truncate max-w-[150px] font-medium text-xs" title={c.nome}>{c.nome || '-'}</td>
+                                            <td className="px-2 py-1 text-gray-500 truncate max-w-[120px] text-xs">{c.convenio || '-'}</td>
+                                            <td className="px-2 py-1 font-bold text-green-700 text-xs">{c.margem_calculada || '-'}</td>
+                                            <td className="px-2 py-1">
+                                                <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase font-bold ${c.status_crm === 'Arquivado' ? 'bg-gray-200 text-gray-600' : c.status_crm === 'Contatado' ? 'bg-blue-100 text-blue-700' : c.status_crm === 'Venda Realizada' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700'}`}>
+                                                    {c.status_crm}
+                                                </span>
+                                            </td>
+                                            <td className="px-2 py-1 text-center" onClick={e=>e.stopPropagation()}>
+                                                <input type="checkbox" checked={c.contato_atualizado || false} onChange={e => saveClient(c.cpf, {contato_atualizado: e.target.checked})} className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 cursor-pointer" title="Marcar como contato atualizado"/>
+                                            </td>
+                                            <td className="px-2 py-1 flex gap-1 items-center">
+                                                {zap && <a href={`https://wa.me/55${zap.replace(/\D/g,'')}`} target="_blank" className="bg-green-500 text-white px-2 py-0.5 rounded hover:bg-green-600 text-[10px] font-bold shadow-sm" onClick={e=>e.stopPropagation()} title={zap}>ZAP</a>}
+                                                {mail && <a href={`mailto:${mail}`} target="_blank" className="bg-orange-500 text-white px-2 py-0.5 rounded hover:bg-orange-600 text-[10px] font-bold shadow-sm" onClick={e=>e.stopPropagation()} title={mail}>EMAIL</a>}
+                                                <button onClick={(e) => quickAction(e, c.cpf, 'Contatado')} className="bg-blue-500 text-white px-2 py-0.5 rounded hover:bg-blue-600 text-[10px] font-bold shadow-sm ml-1">CONTATAR</button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                                {clients.length === 0 && (
+                                    <tr><td colSpan="7" className="p-8 text-center text-gray-400">Nenhum cliente encontrado.</td></tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Batch Query Modal */}
+                    {showBatchModal && (
+                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-xl shadow-2xl w-96">
+                                <h3 className="font-bold text-xl mb-4">Consultar {selectedCpfs.size} Clientes</h3>
+                                <div className="mb-4">
+                                    <label className="block text-sm font-bold text-gray-700 mb-1">Qual Robô (Site)?</label>
+                                    <select value={batchPlugin} onChange={e=>setBatchPlugin(e.target.value)} className="w-full border p-2 rounded">
+                                        {plugins.map(p => <option key={p.name} value={p.name}>{p.display_name}</option>)}
+                                    </select>
+                                </div>
+                                <div className="mb-6">
+                                    <label className="block text-sm font-bold text-gray-700 mb-1">Convênio (Filtro para a pesquisa)</label>
+                                    <input type="text" value={batchConvenio} onChange={e=>setBatchConvenio(e.target.value)} placeholder="Ex: PREF SAO PAULO..." className="w-full border p-2 rounded"/>
+                                    <p className="text-xs text-gray-500 mt-1">Opcional. Se o site exigir convênio para pesquisar.</p>
+                                </div>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={()=>setShowBatchModal(false)} className="px-4 py-2 bg-gray-200 rounded font-bold hover:bg-gray-300">Cancelar</button>
+                                    <button onClick={handleBatchQuerySubmit} className="px-4 py-2 bg-purple-600 text-white rounded font-bold hover:bg-purple-700">Iniciar Robô</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Export Modal */}
+                    {showExportModal && (
+                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+                                <h3 className="font-bold text-xl mb-4 text-slate-800">Exportar {selectedCpfs.size} Clientes</h3>
+                                <p className="text-sm text-gray-600 mb-4">Selecione quais colunas deseja incluir na planilha:</p>
+                                
+                                <div className="flex gap-2 mb-4 pb-2 border-b">
+                                    <button onClick={() => setSelectedExportColumns(new Set(availableColumns))} className="text-xs font-bold bg-blue-100 text-blue-700 px-2 py-1 rounded">Selecionar Tudo</button>
+                                    <button onClick={() => setSelectedExportColumns(new Set())} className="text-xs font-bold bg-gray-200 text-gray-700 px-2 py-1 rounded">Limpar</button>
+                                </div>
+
+                                <div className="flex-1 overflow-auto bg-slate-50 border p-3 rounded mb-4">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        {availableColumns.map(col => (
+                                            <label key={col} className="flex items-center gap-2 cursor-pointer p-1 hover:bg-slate-200 rounded text-sm font-semibold text-gray-700">
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={selectedExportColumns.has(col)} 
+                                                    onChange={(e) => {
+                                                        const newSet = new Set(selectedExportColumns);
+                                                        if (e.target.checked) newSet.add(col);
+                                                        else newSet.delete(col);
+                                                        setSelectedExportColumns(newSet);
+                                                    }} 
+                                                />
+                                                <span className="truncate" title={col}>{col}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                                
+                                <div className="flex justify-end gap-2 mt-auto">
+                                    <button onClick={()=>setShowExportModal(false)} className="px-4 py-2 bg-gray-200 rounded font-bold hover:bg-gray-300">Cancelar</button>
+                                    <button onClick={confirmExport} className="px-4 py-2 bg-green-600 text-white rounded font-bold hover:bg-green-700">Gerar Planilha</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Sidebar Drawer */}
+                    {sidebarClient && (
+                        <div className="absolute top-0 right-0 w-[400px] h-full bg-white shadow-2xl border-l flex flex-col animate-slide-in z-40">
+                            <div className="p-4 border-b flex justify-between items-center bg-slate-50">
+                                <h3 className="font-bold text-lg truncate">{sidebarClient.nome || sidebarClient.cpf}</h3>
+                                <button onClick={() => setSidebarClient(null)} className="text-red-500 font-bold hover:bg-red-100 px-3 py-1 rounded">X Fechar</button>
+                            </div>
+                            <div className="p-4 flex-1 overflow-auto">
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase">Status CRM</label>
+                                    <select value={sidebarClient.status_crm} onChange={e => saveClient(sidebarClient.cpf, {status_crm: e.target.value})} className="w-full border-2 border-slate-200 p-2 rounded mt-1 font-semibold">
+                                        <option>Novo</option><option>Contatado</option><option>Venda Realizada</option><option>Nao Incomodar</option><option>Arquivado</option>
+                                    </select>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase">Lembrar em</label>
+                                    <input type="datetime-local" value={sidebarClient.data_lembrete ? sidebarClient.data_lembrete.substring(0,16) : ''} onChange={e => saveClient(sidebarClient.cpf, {data_lembrete: e.target.value})} className="w-full border-2 border-slate-200 p-2 rounded mt-1"/>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase">Margem Calculada</label>
+                                    <input type="text" value={sidebarClient.margem_calculada || ''} onChange={e => setSidebarClient({...sidebarClient, margem_calculada: e.target.value})} onBlur={e => saveClient(sidebarClient.cpf, {margem_calculada: e.target.value})} className="w-full border-2 border-slate-200 p-2 rounded mt-1 font-bold text-green-700"/>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase">Telefone / WhatsApp</label>
+                                    <div className="flex gap-2">
+                                        <input type="text" value={sidebarClient.telefone || ''} onChange={e => setSidebarClient({...sidebarClient, telefone: e.target.value})} onBlur={e => saveClient(sidebarClient.cpf, {telefone: e.target.value})} className="w-full border-2 border-slate-200 p-2 rounded mt-1 font-semibold" placeholder="Ex: 11999999999"/>
+                                        {sidebarClient.telefone && <a href={`https://wa.me/55${sidebarClient.telefone.replace(/\D/g,'')}`} target="_blank" className="mt-1 bg-green-500 hover:bg-green-600 text-white font-bold px-3 flex items-center rounded">ZAP</a>}
+                                    </div>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-500 uppercase">E-mail</label>
+                                    <div className="flex gap-2">
+                                        <input type="email" value={sidebarClient.email || ''} onChange={e => setSidebarClient({...sidebarClient, email: e.target.value})} onBlur={e => saveClient(sidebarClient.cpf, {email: e.target.value})} className="w-full border-2 border-slate-200 p-2 rounded mt-1 font-semibold" placeholder="email@exemplo.com"/>
+                                        {sidebarClient.email && <a href={`mailto:${sidebarClient.email}`} target="_blank" className="mt-1 bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 flex items-center rounded">EMAIL</a>}
+                                    </div>
+                                </div>
+                                <div className="mb-6">
+                                    <label className="flex items-center gap-3 bg-blue-50 p-3 rounded border border-blue-200 cursor-pointer hover:bg-blue-100 transition-colors">
+                                        <input type="checkbox" checked={sidebarClient.contato_atualizado || false} onChange={e => {
+                                            setSidebarClient({...sidebarClient, contato_atualizado: e.target.checked});
+                                            saveClient(sidebarClient.cpf, {contato_atualizado: e.target.checked});
+                                        }} className="w-5 h-5 text-blue-600 bg-white border-gray-300 rounded focus:ring-blue-500 cursor-pointer"/>
+                                        <span className="font-bold text-blue-900">Contato Atualizado</span>
+                                    </label>
+                                </div>
+                                
+                                <h4 className="font-bold mt-8 mb-3 border-b pb-2 uppercase text-gray-400 text-sm">Ficha Completa (Planilha)</h4>
+                                <div className="bg-slate-50 p-3 rounded border">
+                                    {sidebarClient.dados_extras && Object.entries(sidebarClient.dados_extras).map(([k,v]) => (
+                                        v && v !== 'nan' ? <div key={k} className="mb-2.5 pb-2.5 border-b border-slate-200 last:border-0 last:mb-0 last:pb-0">
+                                            <span className="text-xs font-bold text-gray-400 block mb-0.5">{k}:</span>
+                                            <span className="text-sm text-gray-800 break-all">{v}</span>
+                                        </div> : null
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         function App() {
             const API_URL = '/api';
             const [activeTab, setActiveTab] = useState('execute');
@@ -30,8 +466,26 @@
             const [configValues, setConfigValues] = useState({});
             const [isExecuting, setIsExecuting] = useState(false);
             const [message, setMessage] = useState(null);
-            const [speed, setSpeed] = useState(1.0);
             const [showArchived, setShowArchived] = useState(false);
+            const [speed, setSpeed] = useState("1.0");
+
+            const [selectedTaskHistory, setSelectedTaskHistory] = useState(null);
+            const [taskHistoryResults, setTaskHistoryResults] = useState([]);
+            const [loadingResults, setLoadingResults] = useState(false);
+
+            const openTaskModal = async (t) => {
+                setSelectedTaskHistory(t);
+                setLoadingResults(true);
+                setTaskHistoryResults([]);
+                try {
+                    const res = await fetch(`${API_URL}/tasks/${t.id}/results`);
+                    const data = await res.json();
+                    setTaskHistoryResults(data.data || []);
+                } catch (e) {
+                    console.error(e);
+                }
+                setLoadingResults(false);
+            };
             const [rateLimit, setRateLimit] = useState({ limit_cpfs: 0, limit_hours: 1.0, current_count: 0 });
             const [showLimitModal, setShowLimitModal] = useState(false);
             const [licenseInfo, setLicenseInfo] = useState({ status: 'checking', hwid: '', message: '' });
@@ -130,6 +584,21 @@
                     await fetch(`${API_URL}/tasks/${taskId}/resume`, { method: 'POST' });
                     fetchTasks();
                 } catch (err) { alert('Erro ao retomar tarefa.'); }
+            };
+
+            const handleImportToCrm = async (taskId, defaultConvenio) => {
+                const convenio = prompt("Confirmar o Convênio/Rótulo destes clientes:", defaultConvenio || "Histórico");
+                if (!convenio) return;
+                try {
+                    const fd = new FormData();
+                    fd.append('convenio', convenio);
+                    const res = await fetch(`${API_URL}/crm/import_from_task/${taskId}`, { method: 'POST', body: fd });
+                    const data = await res.json();
+                    if (res.ok) alert(`Sucesso! ${data.total_imported} clientes salvos/atualizados no CRM.`);
+                    else alert(`Erro: ${data.detail || JSON.stringify(data)}`);
+                } catch (err) {
+                    alert('Erro de conexão ao importar para o CRM');
+                }
             };
 
             const saveRateLimit = async () => {
@@ -265,26 +734,26 @@
                     </div>
                 );
             }
-
             return (
                 <div className="min-h-screen flex flex-col">
-                    <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-                        <h1 className="text-2xl font-bold text-slate-800">RPA Automator</h1>
-                        <div className="flex items-center gap-4">
-                            <div className="bg-slate-100 px-4 py-2 rounded-lg border border-slate-200 text-sm flex items-center gap-2">
+                    <header className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between">
+                        <h1 className="text-xl font-bold text-slate-800">RPA Automator</h1>
+                        <div className="flex items-center gap-3">
+                            <div className="bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-xs flex items-center gap-2">
                                 <span className="text-slate-600 font-semibold">Limite:</span>
                                 {rateLimit.limit_cpfs === 0 ? (
                                     <span className="text-green-600 font-bold">Ilimitado</span>
                                 ) : (
                                     <span className={`${rateLimit.current_count >= rateLimit.limit_cpfs ? 'text-red-600' : 'text-blue-600'} font-bold`}>
-                                        {rateLimit.current_count} / {rateLimit.limit_cpfs} <span className="text-xs text-slate-500 font-normal">({rateLimit.limit_hours}h)</span>
+                                        {rateLimit.current_count} / {rateLimit.limit_cpfs} <span className="text-[10px] text-slate-500 font-normal">({rateLimit.limit_hours}h)</span>
                                     </span>
                                 )}
-                                <button onClick={() => setShowLimitModal(true)} className="ml-2 hover:bg-slate-200 p-1 rounded" title="Configurar Limite">&#9881;</button>
+                                <button onClick={() => setShowLimitModal(true)} className="ml-1 hover:bg-slate-200 p-1 rounded" title="Configurar Limite">&#9881;</button>
                             </div>
                             <div className="flex bg-slate-100 rounded-lg p-1">
-                                <button onClick={() => setActiveTab('execute')} className={`px-4 py-2 rounded-md font-medium text-sm transition-colors ${activeTab === 'execute' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Executar</button>
-                                <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded-md font-medium text-sm transition-colors ${activeTab === 'history' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Historico</button>
+                                <button onClick={() => setActiveTab('crm')} className={`px-3 py-1.5 rounded-md font-medium text-xs transition-colors ${activeTab === 'crm' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>CRM</button>
+                                <button onClick={() => setActiveTab('execute')} className={`px-3 py-1.5 rounded-md font-medium text-xs transition-colors ${activeTab === 'execute' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Executar</button>
+                                <button onClick={() => setActiveTab('history')} className={`px-3 py-1.5 rounded-md font-medium text-xs transition-colors ${activeTab === 'history' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Histórico</button>
                             </div>
                         </div>
                     </header>
@@ -310,12 +779,14 @@
                         </div>
                     )}
 
-                    <main className="flex-1 p-6 max-w-5xl w-full mx-auto">
+                    <main className="flex-1 flex flex-col p-6 max-w-7xl w-full mx-auto">
                         {message && (
                             <div className={`mb-6 p-4 rounded-md font-medium ${message.type === 'error' ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}>
                                 {message.text}
                             </div>
                         )}
+
+                        {activeTab === 'crm' && <CrmTab plugins={plugins} />}
 
                         {activeTab === 'execute' && (
                             <div className="bg-white rounded-xl shadow border p-6">
@@ -407,7 +878,7 @@
                         )}
 
                         {activeTab === 'history' && (
-                            <div className="bg-white rounded-xl shadow border p-6">
+                            <div className="bg-white rounded-xl shadow border p-6 flex flex-col flex-1 h-full min-h-[600px] overflow-hidden">
                                 <div className="flex justify-between items-center mb-6">
                                     <h2 className="text-xl font-bold">Historico de Execucoes</h2>
                                     <div className="flex gap-2">
@@ -417,11 +888,13 @@
                                         </button>
                                     </div>
                                 </div>
-                                <table className="w-full text-left">
+                                <div className="flex-1 overflow-auto">
+                                    <table className="w-full text-left">
                                     <thead>
                                         <tr className="border-b">
                                             <th className="p-2">Data</th>
                                             <th className="p-2">Site</th>
+                                            <th className="p-2">Convênio</th>
                                             <th className="p-2">Status</th>
                                             <th className="p-2">CPFs</th>
                                             <th className="p-2 text-right">Resultado</th>
@@ -429,9 +902,10 @@
                                     </thead>
                                     <tbody>
                                         {tasks.map(t => (
-                                            <tr key={t.id} className="border-b hover:bg-slate-50 transition-colors">
+                                            <tr key={t.id} className="border-b hover:bg-slate-100 transition-colors cursor-pointer" onClick={(e) => { if(e.target.tagName !== 'BUTTON' && e.target.tagName !== 'A' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT') openTaskModal(t); }}>
                                                 <td className="p-2 text-sm">{new Date(t.created_at + 'Z').toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}</td>
                                                 <td className="p-2">{t.plugin_name}</td>
+                                                <td className="p-2 text-sm text-gray-600">{t.convenio || '-'}</td>
                                                 <td className="p-2 font-medium">
                                                     <span className={
                                                         t.status === 'completed' ? 'text-green-600' :
@@ -454,10 +928,11 @@
                                                             {t.current_item}
                                                         </div>
                                                     )}
-                                                    {t.status === 'running_rpa' && t.processed_cpfs > 0 && (
-                                                        <div className="flex flex-col gap-1 mt-2 text-xs text-gray-600 bg-blue-50 p-1.5 rounded border border-blue-100">
+                                                    {(t.processed_cpfs > 0) && (
+                                                        <div className="flex flex-col gap-1 mt-2 text-xs text-gray-600 bg-slate-50 p-1.5 rounded border border-slate-200">
                                                             {(() => {
-                                                                const totalElapsedSec = (new Date() - new Date(t.created_at + 'Z')) / 1000;
+                                                                const endTime = t.completed_at ? new Date(t.completed_at + 'Z') : new Date();
+                                                                const totalElapsedSec = (endTime - new Date(t.created_at + 'Z')) / 1000;
                                                                 let waitSec = t.total_login_wait_seconds || 0;
                                                                 if (t.status === 'aguardando_login' && t.last_login_wait_start) {
                                                                     waitSec += (new Date() - new Date(t.last_login_wait_start + 'Z')) / 1000;
@@ -465,14 +940,17 @@
                                                                 const execSec = Math.max(1, totalElapsedSec - waitSec);
                                                                 const execMin = Math.max(0.1, execSec / 60);
                                                                 const rpm = (t.processed_cpfs / execMin).toFixed(1);
-                                                                const etaMin = Math.ceil((t.total_cpfs - t.processed_cpfs) / (t.processed_cpfs / execMin));
+                                                                let etaMin = 0;
+                                                                if (t.status === 'running_rpa') {
+                                                                    etaMin = Math.ceil((t.total_cpfs - t.processed_cpfs) / (t.processed_cpfs / execMin));
+                                                                }
 
                                                                 const formatTime = (s) => `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
 
                                                                 return (
                                                                     <div>
                                                                         <div title="Consultas por minuto">Velocidade: <strong>{rpm}</strong> / min</div>
-                                                                        <div title="Tempo estimado para conclusao">Previsao: <strong>{etaMin}</strong> min restantes</div>
+                                                                        {t.status === 'running_rpa' && <div title="Tempo estimado para conclusao">Previsao: <strong>{etaMin}</strong> min restantes</div>}
                                                                         <div className="mt-1 flex justify-between text-[10px] bg-white p-1 rounded border border-slate-200">
                                                                             <span title="Tempo real do robo trabalhando">Trab: {formatTime(execSec)}</span>
                                                                             <span title="Tempo gasto aguardando usuario logar">Esp: {formatTime(waitSec)}</span>
@@ -481,19 +959,27 @@
                                                                 );
                                                             })()}
                                                             <div className="mt-2 pt-2 border-t border-blue-200">
-                                                                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
-                                                                    Ajustar Ritmo (Velocidade: {(1 / t.speed_multiplier).toFixed(1)}x)
-                                                                </label>
-                                                                <div className="flex items-center gap-1">
-                                                                    <span>&#128034;</span>
-                                                                    <input
-                                                                        type="range" min="0.1" max="2.0" step="0.1"
-                                                                        defaultValue={(2.1 - t.speed_multiplier).toFixed(1)}
-                                                                        onMouseUp={(e) => handleSpeedChange(t.id, (2.1 - parseFloat(e.target.value)).toFixed(1))}
-                                                                        className="w-full h-1"
-                                                                    />
-                                                                    <span>&#128640;</span>
-                                                                </div>
+                                                                {['running_rpa', 'aguardando_login', 'pending'].includes(t.status) ? (
+                                                                    <>
+                                                                        <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                                                                            Ajustar Ritmo (Velocidade: {(1 / t.speed_multiplier).toFixed(1)}x)
+                                                                        </label>
+                                                                        <div className="flex items-center gap-1">
+                                                                            <span>&#128034;</span>
+                                                                            <input
+                                                                                type="range" min="0.1" max="2.0" step="0.1"
+                                                                                defaultValue={(2.1 - t.speed_multiplier).toFixed(1)}
+                                                                                onMouseUp={(e) => handleSpeedChange(t.id, (2.1 - parseFloat(e.target.value)).toFixed(1))}
+                                                                                className="w-full h-1"
+                                                                            />
+                                                                            <span>&#128640;</span>
+                                                                        </div>
+                                                                    </>
+                                                                ) : (
+                                                                    <div className="text-[10px] uppercase font-bold text-slate-500 text-center">
+                                                                        Ritmo Final: {(1 / t.speed_multiplier).toFixed(1)}x
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     )}
@@ -510,12 +996,17 @@
                                                         </button>
                                                     )}
                                                     {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && (
-                                                        <a href={`/outputs/${t.file_path_output.split('/').pop().split('\\\\').pop()}`} download className="bg-green-100 text-green-700 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                        <a href={`/outputs/${t.file_path_output.split('/').pop().split('\\\\').pop()}`} download className="bg-green-100 hover:bg-green-200 text-green-700 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
                                                             {t.status === 'error' || t.status === 'canceled' ? 'Baixar Parcial' : 'Baixar Completo'}
                                                         </a>
                                                     )}
+                                                    {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && t.processed_cpfs > 0 && (
+                                                        <button onClick={() => handleImportToCrm(t.id, t.convenio)} className="bg-purple-100 hover:bg-purple-200 text-purple-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold mt-1">
+                                                            Salvar no CRM
+                                                        </button>
+                                                    )}
                                                     {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && t.processed_cpfs < t.total_cpfs && (
-                                                        <a href={`/api/tasks/${t.id}/download_unprocessed`} download className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                        <a href={`/api/tasks/${t.id}/download_unprocessed`} download className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold mt-1">
                                                             Baixar Restantes
                                                         </a>
                                                     )}
@@ -527,6 +1018,65 @@
                                         ))}
                                     </tbody>
                                 </table>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {selectedTaskHistory && (
+                            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+                                <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl flex flex-col max-h-[90vh]">
+                                    <div className="p-4 border-b flex justify-between items-center bg-slate-50 rounded-t-xl">
+                                        <h2 className="text-xl font-bold text-slate-800">Relatório da Consulta #{selectedTaskHistory.id}</h2>
+                                        <button onClick={() => setSelectedTaskHistory(null)} className="text-gray-500 hover:bg-gray-200 px-3 py-1 rounded font-bold transition-colors">X FECHAR</button>
+                                    </div>
+                                    <div className="p-6 overflow-auto flex-1 bg-slate-100 rounded-b-xl">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                                            <div className="bg-white p-3 rounded shadow-sm border border-slate-200">
+                                                <p className="text-xs text-gray-500 font-bold uppercase mb-1">Início</p>
+                                                <p className="font-semibold text-sm">{new Date(selectedTaskHistory.created_at + 'Z').toLocaleString('pt-BR')}</p>
+                                            </div>
+                                            <div className="bg-white p-3 rounded shadow-sm border border-slate-200">
+                                                <p className="text-xs text-gray-500 font-bold uppercase mb-1">Fim</p>
+                                                <p className="font-semibold text-sm">{selectedTaskHistory.completed_at ? new Date(selectedTaskHistory.completed_at + 'Z').toLocaleString('pt-BR') : '-'}</p>
+                                            </div>
+                                            <div className="bg-white p-3 rounded shadow-sm border border-slate-200">
+                                                <p className="text-xs text-gray-500 font-bold uppercase mb-1">Progresso</p>
+                                                <p className="font-semibold text-sm">{selectedTaskHistory.processed_cpfs} / {selectedTaskHistory.total_cpfs} CPFs</p>
+                                            </div>
+                                            <div className="bg-white p-3 rounded shadow-sm border border-slate-200">
+                                                <p className="text-xs text-gray-500 font-bold uppercase mb-1">Status</p>
+                                                <p className="font-semibold text-sm uppercase">{selectedTaskHistory.status}</p>
+                                            </div>
+                                        </div>
+                                        
+                                        <div className="bg-white rounded border border-slate-200 overflow-hidden shadow-sm">
+                                            <div className="p-3 bg-slate-50 border-b font-bold text-gray-700 flex justify-between items-center">
+                                                <span>Resultados Detalhados {loadingResults && <span className="ml-2 text-blue-500 animate-pulse">(Carregando...)</span>}</span>
+                                                <span className="text-xs text-gray-500 font-normal">{taskHistoryResults.length} registros</span>
+                                            </div>
+                                            <div className="overflow-x-auto max-h-[50vh]">
+                                                <table className="w-full text-sm text-left whitespace-nowrap">
+                                                    <thead className="bg-slate-200 sticky top-0 shadow-sm z-10">
+                                                        <tr>
+                                                            {taskHistoryResults.length > 0 ? Object.keys(taskHistoryResults[0]).map(k => (
+                                                                <th key={k} className="p-2 border-b font-bold text-gray-700">{k}</th>
+                                                            )) : <th className="p-4 border-b text-center text-gray-500 font-normal">Nenhum resultado processado ainda ou erro ao carregar arquivo.</th>}
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {taskHistoryResults.map((row, i) => (
+                                                            <tr key={i} className="border-b hover:bg-blue-50 transition-colors">
+                                                                {Object.values(row).map((val, j) => (
+                                                                    <td key={j} className="p-2 text-gray-700 max-w-[250px] truncate" title={val}>{val}</td>
+                                                                ))}
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </main>

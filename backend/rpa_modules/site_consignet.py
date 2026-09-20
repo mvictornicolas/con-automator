@@ -122,21 +122,27 @@ class SiteConsignet(BaseRPAProvider):
             # 2. Navegacao Inicial
             human_sleep(0.5, 1.0)
 
-            if "/auth/context" in page.url:
+            if convenio:
+                if progress_callback:
+                    progress_callback(0, len(items), f"Selecionando convênio: {convenio}...", "running_rpa")
+                
                 try:
-                    page.wait_for_selector("input#context-search", state="visible", timeout=5000)
+                    page.goto("https://www.www1.consignet.com.br/auth/context")
+                    page.wait_for_selector("input#context-search", state="visible", timeout=10000)
+                    page.fill("input#context-search", "")
                     page.type("input#context-search", convenio, delay=random.randint(20, 50))
                     human_sleep(0.2, 0.5)
                     page.press("input#context-search", "Enter")
-                    human_sleep(0.8, 1.5)
+                    human_sleep(1.0, 1.5)
                     
                     try:
+                        # Clica no primeiro item de convenio que aparecer na busca
                         page.click(".context-item", delay=random.randint(20, 50), timeout=5000)
                         page.wait_for_url("**/admin/home", timeout=15000)
                     except Exception:
                         pass
                 except Exception as e:
-                    print(f"Ignorando interacao de contexto (pode ja ter sido redirecionado): {e}")
+                    print(f"Falha ao tentar selecionar o convenio '{convenio}' (pode estar vazio ou erro): {e}")
 
             human_sleep(0.5, 1.0)
             page.goto("https://www.www1.consignet.com.br/admin/margem-contratacao")
@@ -144,6 +150,7 @@ class SiteConsignet(BaseRPAProvider):
             human_sleep(0.5, 1.0)
 
             # 3. Inicia o loop de coletas
+            ultimo_cpf_coletado = None
             try:
                 for i, item in enumerate(items):
 
@@ -230,6 +237,12 @@ class SiteConsignet(BaseRPAProvider):
                         human_sleep(0.1 * s_mult, 0.3 * s_mult)
                         page.type("input#search-funcionario-matricula", str(item), delay=int(random.randint(15, 40) * s_mult))
                         human_sleep(0.2 * s_mult, 0.4 * s_mult)
+                        
+                        # Limpa CPF cacheado para não ler lixo na validação
+                        try:
+                            page.evaluate('document.querySelector("input#search-funcionario-cpf").value = ""')
+                        except: pass
+                        
                         page.press("input#search-funcionario-matricula", "Enter")
                     else:
                         page.click("input#search-funcionario-cpf")
@@ -242,13 +255,45 @@ class SiteConsignet(BaseRPAProvider):
                     if register_query_callback:
                         register_query_callback()
 
-                    # Tempo minimo de 0.5s para o servidor responder a busca inicial
+                    # Tempo minimo para o servidor responder a busca inicial
                     min_sleep = max(0.5, 0.7 * s_mult)
                     human_sleep(min_sleep, min_sleep + 0.5)
 
                     # Passo 2: Coletar o CPF real e a margem
                     cpf_input = page.locator("input#search-funcionario-cpf")
-                    cpf_coletado = cpf_input.input_value() if cpf_input.is_visible() else ""
+                    
+                    # Aguarda o CPF ser preenchido e desocultado validando os numeros
+                    cpf_coletado = ""
+                    for attempt in range(10): # Tenta por aprox. 4 a 5 segundos
+                        if cpf_input.is_visible():
+                            val = cpf_input.input_value()
+                            if val:
+                                val_limpo = val.replace(".", "").replace("-", "").strip()
+                                
+                                # Se é numérico e tem 11 digitos, sucesso!
+                                if val_limpo.isdigit() and len(val_limpo) == 11:
+                                    # NOVA CHECAGEM: É exatamente o mesmo CPF de 1 segundo atrás?
+                                    if val == ultimo_cpf_coletado and attempt < 4:
+                                        # Pode ser um "fantasma" do cache que o JS não limpou a tempo.
+                                        # Vamos ignorar essa rodada para dar chance do site atualizar.
+                                        pass
+                                    else:
+                                        cpf_coletado = val
+                                        break
+                                
+                                # Se chegou aqui, ou tem asteriscos, letras ou está incompleto
+                                try:
+                                    toggle_btn = page.locator('button[aria-label="Toggle cpf visibility"]:visible, button:has(svg[data-testid="VisibilityIcon"]):visible').first
+                                    if toggle_btn.is_visible(timeout=500):
+                                        toggle_btn.click(delay=int(random.randint(10, 30) * s_mult))
+                                except Exception:
+                                    pass
+                        
+                        time.sleep(0.5 * s_mult)
+                    
+                    # Ultima tentativa (garantia de capturar o que ficou na tela)
+                    if not cpf_coletado and cpf_input.is_visible():
+                        cpf_coletado = cpf_input.input_value()
 
                     if not cpf_coletado or cpf_coletado.strip() == "":
                         results.append({
@@ -319,13 +364,21 @@ class SiteConsignet(BaseRPAProvider):
                             close_btn.first.wait_for(state="visible", timeout=1500)
                             close_btn.first.click(delay=int(random.randint(20, 50) * s_mult))
                         except Exception:
-                            # Se os botoes realmente nao aparecerem, recarrega a pagina
-                            page.goto("https://www.www1.consignet.com.br/admin/margem-contratacao")
                             try:
-                                page.wait_for_url("**/admin/margem-contratacao", timeout=10000)
+                                generic_x = page.locator('button:has(svg[data-testid="CloseIcon"]):visible').first
+                                generic_x.wait_for(timeout=1500)
+                                generic_x.click(delay=int(random.randint(20, 50) * s_mult))
                             except Exception:
-                                pass
+                                # Se os botoes realmente nao aparecerem, recarrega a pagina
+                                page.goto("https://www.www1.consignet.com.br/admin/margem-contratacao")
+                                try:
+                                    page.wait_for_url("**/admin/margem-contratacao", timeout=10000)
+                                except Exception:
+                                    pass
 
+                    # Guarda o CPF coletado nesta rodada para checagem de cache na próxima
+                    ultimo_cpf_coletado = cpf_coletado
+                    
                     # Pausa leve antes do proximo CPF
                     human_sleep(0.3 * s_mult, 0.8 * s_mult)
 

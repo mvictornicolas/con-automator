@@ -1,0 +1,1 @@
+C:\Users\USER\AppData\Local\Python\pythoncore-3.11-64\Scripts\pyinstaller.exe --noconfirm --onefile --windowed --add-data "templates;templates" --collect-all playwright --name "ConsignetRobo" launcher.py
