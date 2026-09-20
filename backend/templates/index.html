@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPA Automator</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel para compilar JSX no navegador -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function App() {
+            const API_URL = '/api';
+            const [activeTab, setActiveTab] = useState('execute');
+            const [plugins, setPlugins] = useState([]);
+            const [tasks, setTasks] = useState([]);
+            const [selectedPlugin, setSelectedPlugin] = useState('');
+
+            const [file, setFile] = useState(null);
+            const [manualText, setManualText] = useState('');
+            const [configValues, setConfigValues] = useState({});
+            const [isExecuting, setIsExecuting] = useState(false);
+            const [message, setMessage] = useState(null);
+            const [speed, setSpeed] = useState(1.0);
+            const [showArchived, setShowArchived] = useState(false);
+            const [rateLimit, setRateLimit] = useState({ limit_cpfs: 0, limit_hours: 1.0, current_count: 0 });
+            const [showLimitModal, setShowLimitModal] = useState(false);
+            const [licenseInfo, setLicenseInfo] = useState({ status: 'checking', hwid: '', message: '' });
+            const [tokenInput, setTokenInput] = useState('');
+
+            const showArchivedRef = React.useRef(showArchived);
+            useEffect(() => { showArchivedRef.current = showArchived; }, [showArchived]);
+
+            const fetchLicense = async () => {
+                try {
+                    const res = await fetch(`${API_URL}/license/status`);
+                    const data = await res.json();
+                    setLicenseInfo(data);
+                } catch (err) {
+                    setLicenseInfo({ status: 'invalid', message: 'Erro ao verificar licença' });
+                }
+            };
+
+            useEffect(() => {
+                fetchLicense();
+                fetchPlugins();
+                fetchTasks();
+                fetchRateLimit();
+                const interval = setInterval(() => {
+                    fetchTasks(showArchivedRef.current);
+                    fetchRateLimit();
+                }, 3000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const showLimitModalRef = React.useRef(showLimitModal);
+            useEffect(() => { showLimitModalRef.current = showLimitModal; }, [showLimitModal]);
+
+            const fetchRateLimit = async () => {
+                try {
+                    const res = await fetch(`${API_URL}/settings/rate_limit`);
+                    const data = await res.json();
+                    setRateLimit(prev => showLimitModalRef.current ? { ...prev, current_count: data.current_count } : data);
+                } catch (err) {}
+            };
+
+            const fetchPlugins = async () => {
+                try {
+                    const res = await fetch(`${API_URL}/plugins`);
+                    const data = await res.json();
+                    setPlugins(data);
+                    if (data.length > 0) {
+                        setSelectedPlugin(data[0].name);
+                        fetchPluginConfig(data[0].name);
+                    }
+                } catch (err) { console.error(err); }
+            };
+
+            const fetchPluginConfig = async (pluginName) => {
+                try {
+                    const res = await fetch(`${API_URL}/config/${pluginName}`);
+                    const data = await res.json();
+                    setConfigValues(data || {});
+                } catch (err) { console.error(err); }
+            };
+
+            const fetchTasks = async (archived = showArchivedRef.current) => {
+                try {
+                    const res = await fetch(`${API_URL}/tasks?archived=${archived}`);
+                    const data = await res.json();
+                    setTasks(data);
+                } catch (err) { console.error(err); }
+            };
+
+            const handleArchiveTask = async (taskId, archive) => {
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/archive?archive=${archive}`, { method: 'PUT' });
+                    fetchTasks();
+                } catch (err) { console.error(err); }
+            };
+
+            const handleArchiveAll = async () => {
+                if (!confirm('Deseja arquivar todo o historico atual?')) return;
+                try {
+                    await fetch(`${API_URL}/tasks/archive_all`, { method: 'PUT' });
+                    fetchTasks();
+                } catch (err) { console.error(err); }
+            };
+
+            const handleCancelTask = async (taskId) => {
+                if (!confirm('Cancelar esta execucao?')) return;
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/cancel`, { method: 'PUT' });
+                    fetchTasks();
+                } catch (err) { console.error(err); }
+            };
+
+            const handleResumeTask = async (taskId) => {
+                if (!confirm('Retomar esta execucao com os CPFs restantes?')) return;
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/resume`, { method: 'POST' });
+                    fetchTasks();
+                } catch (err) { alert('Erro ao retomar tarefa.'); }
+            };
+
+            const saveRateLimit = async () => {
+                try {
+                    await fetch(`${API_URL}/settings/rate_limit`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ limit_cpfs: rateLimit.limit_cpfs, limit_hours: rateLimit.limit_hours })
+                    });
+                    setShowLimitModal(false);
+                    fetchRateLimit();
+                    setMessage({ type: 'success', text: 'Limites atualizados!' });
+                    setTimeout(() => setMessage(null), 3000);
+                } catch (err) {}
+            };
+
+            const saveConfig = async () => {
+                try {
+                    await fetch(`${API_URL}/config/${selectedPlugin}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(configValues)
+                    });
+                    setMessage({ type: 'success', text: 'Configuracoes salvas!' });
+                    setTimeout(() => setMessage(null), 3000);
+                } catch (err) {
+                    setMessage({ type: 'error', text: 'Erro ao salvar configs' });
+                }
+            };
+
+            const handleActivateLicense = async () => {
+                try {
+                    const res = await fetch(`${API_URL}/license/activate`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: tokenInput })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        alert("Licenca ativada com sucesso!");
+                        window.location.reload();
+                    } else {
+                        alert(data.detail || 'Token invalido');
+                    }
+                } catch (err) {
+                    alert('Erro de conexao');
+                }
+            };
+
+            const handleSpeedChange = async (taskId, newSpeed) => {
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/speed`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ speed_multiplier: parseFloat(newSpeed) })
+                    });
+                    fetchTasks();
+                } catch (err) {
+                    console.error("Erro ao atualizar velocidade", err);
+                }
+            };
+
+            const handleExecute = async () => {
+                if (!file && !manualText) {
+                    setMessage({ type: 'error', text: 'Forneca um arquivo ou lista' });
+                    return;
+                }
+                setIsExecuting(true);
+                await saveConfig();
+
+                const formData = new FormData();
+                formData.append('plugin_name', selectedPlugin);
+                formData.append('speed', speed);
+                if (file) {
+                    formData.append('file', file);
+                } else {
+                    const blob = new Blob([manualText], { type: 'text/plain' });
+                    formData.append('file', blob, 'manual_input.txt');
+                }
+
+                try {
+                    const res = await fetch(`${API_URL}/execute`, { method: 'POST', body: formData });
+                    if (res.ok) {
+                        setMessage({ type: 'success', text: 'Automacao iniciada! O Chrome abrira em breve na sua tela.' });
+                        setFile(null);
+                        setManualText('');
+                        fetchTasks();
+                        setTimeout(() => { setMessage(null); setActiveTab('history'); }, 3000);
+                    } else {
+                        const data = await res.json();
+                        setMessage({ type: 'error', text: data.detail || 'Erro' });
+                    }
+                } catch (err) {
+                    setMessage({ type: 'error', text: 'Erro de conexao' });
+                } finally {
+                    setIsExecuting(false);
+                }
+            };
+
+            if (licenseInfo.status === 'checking') {
+                return <div className="min-h-screen flex items-center justify-center bg-slate-100">Carregando...</div>;
+            }
+
+            if (licenseInfo.status === 'invalid') {
+                return (
+                    <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
+                        <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-8 text-center">
+                            <h2 className="text-2xl font-bold text-slate-800 mb-2">Software Bloqueado</h2>
+                            <p className="text-red-600 font-semibold mb-6">{licenseInfo.message || 'Licença ausente ou inválida'}</p>
+                            
+                            <div className="bg-slate-100 p-4 rounded text-left mb-6">
+                                <p className="text-sm font-bold text-slate-600 mb-1">Seu Hardware ID (HWID):</p>
+                                <code className="block bg-slate-200 p-2 rounded text-sm text-slate-800 break-all select-all font-mono">
+                                    {licenseInfo.hwid}
+                                </code>
+                                <p className="text-xs text-slate-500 mt-2">Envie este código ao desenvolvedor para adquirir uma licença.</p>
+                            </div>
+
+                            <div className="text-left mb-6">
+                                <label className="block text-sm font-bold mb-2 text-slate-700">Token de Ativação:</label>
+                                <textarea 
+                                    className="w-full border-2 border-slate-300 rounded p-3 h-24 font-mono text-sm focus:border-blue-500 focus:outline-none"
+                                    placeholder="Cole seu token aqui..."
+                                    value={tokenInput}
+                                    onChange={e => setTokenInput(e.target.value)}
+                                ></textarea>
+                            </div>
+
+                            <button onClick={handleActivateLicense} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded transition-colors">
+                                Validar e Ativar
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+                        <h1 className="text-2xl font-bold text-slate-800">RPA Automator</h1>
+                        <div className="flex items-center gap-4">
+                            <div className="bg-slate-100 px-4 py-2 rounded-lg border border-slate-200 text-sm flex items-center gap-2">
+                                <span className="text-slate-600 font-semibold">Limite:</span>
+                                {rateLimit.limit_cpfs === 0 ? (
+                                    <span className="text-green-600 font-bold">Ilimitado</span>
+                                ) : (
+                                    <span className={`${rateLimit.current_count >= rateLimit.limit_cpfs ? 'text-red-600' : 'text-blue-600'} font-bold`}>
+                                        {rateLimit.current_count} / {rateLimit.limit_cpfs} <span className="text-xs text-slate-500 font-normal">({rateLimit.limit_hours}h)</span>
+                                    </span>
+                                )}
+                                <button onClick={() => setShowLimitModal(true)} className="ml-2 hover:bg-slate-200 p-1 rounded" title="Configurar Limite">&#9881;</button>
+                            </div>
+                            <div className="flex bg-slate-100 rounded-lg p-1">
+                                <button onClick={() => setActiveTab('execute')} className={`px-4 py-2 rounded-md font-medium text-sm transition-colors ${activeTab === 'execute' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Executar</button>
+                                <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded-md font-medium text-sm transition-colors ${activeTab === 'history' ? 'bg-white shadow text-blue-600' : 'text-slate-600'}`}>Historico</button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {showLimitModal && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-xl shadow-lg w-96">
+                                <h3 className="text-xl font-bold mb-4">Configurar Limites</h3>
+                                <div className="mb-4">
+                                    <label className="block text-sm font-semibold mb-1">Consultas Permitidas</label>
+                                    <input type="number" className="w-full border p-2 rounded" value={rateLimit.limit_cpfs} onChange={e => setRateLimit({...rateLimit, limit_cpfs: parseInt(e.target.value) || 0})} />
+                                    <p className="text-xs text-gray-500 mt-1">Deixe 0 para Ilimitado</p>
+                                </div>
+                                <div className="mb-6">
+                                    <label className="block text-sm font-semibold mb-1">A cada X horas (Janela)</label>
+                                    <input type="number" step="0.5" className="w-full border p-2 rounded" value={rateLimit.limit_hours} onChange={e => setRateLimit({...rateLimit, limit_hours: parseFloat(e.target.value) || 1.0})} />
+                                </div>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowLimitModal(false)} className="px-4 py-2 bg-gray-200 rounded font-semibold">Cancelar</button>
+                                    <button onClick={saveRateLimit} className="px-4 py-2 bg-blue-600 text-white rounded font-bold">Salvar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <main className="flex-1 p-6 max-w-5xl w-full mx-auto">
+                        {message && (
+                            <div className={`mb-6 p-4 rounded-md font-medium ${message.type === 'error' ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}>
+                                {message.text}
+                            </div>
+                        )}
+
+                        {activeTab === 'execute' && (
+                            <div className="bg-white rounded-xl shadow border p-6">
+                                <h3 className="text-lg font-bold mb-2">1. Selecione o Site</h3>
+                                <select
+                                    className="w-full md:w-1/2 border rounded p-2 mb-6"
+                                    value={selectedPlugin} onChange={(e) => { setSelectedPlugin(e.target.value); fetchPluginConfig(e.target.value); }}
+                                >
+                                    {plugins.map(p => <option key={p.name} value={p.name}>{p.display_name}</option>)}
+                                </select>
+
+                                {plugins.find(p => p.name === selectedPlugin) && (
+                                    <div className="bg-slate-50 p-4 rounded-lg border mb-6">
+                                        <h3 className="font-bold mb-4">Configuracoes do Site (Credenciais)</h3>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {plugins.find(p => p.name === selectedPlugin).required_configs.map(f => (
+                                                <div key={f.key}>
+                                                    <label className="block text-sm font-medium mb-1">{f.label}</label>
+                                                    {f.type === 'select' ? (
+                                                        <select
+                                                            className="w-full border rounded p-2 bg-white"
+                                                            value={configValues[f.key] || ''}
+                                                            onChange={(e) => setConfigValues({...configValues, [f.key]: e.target.value})}
+                                                        >
+                                                            <option value="" disabled>Selecione uma opcao</option>
+                                                            {f.options.map(opt => (
+                                                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        <input
+                                                            type={f.type}
+                                                            className="w-full border rounded p-2"
+                                                            value={configValues[f.key] || ''}
+                                                            onChange={(e) => setConfigValues({...configValues, [f.key]: e.target.value})}
+                                                        />
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                <h3 className="text-lg font-bold mb-2">2. Dados de Entrada (CPFs)</h3>
+                                <div className="grid grid-cols-2 gap-6 mb-6">
+                                    <div className="border-2 border-dashed rounded-lg p-6 text-center bg-slate-50">
+                                        <p className="font-medium mb-2">Enviar Planilha (CSV/XLSX/TXT)</p>
+                                        <input type="file" onChange={e => setFile(e.target.files[0])} className="text-sm" />
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <p className="font-medium mb-2">Ou Cole Manualmente</p>
+                                        <textarea
+                                            className="border rounded p-2 flex-1"
+                                            placeholder="123.456.789-00&#10;987.654.321-11"
+                                            value={manualText} onChange={e => setManualText(e.target.value)} disabled={!!file}
+                                        ></textarea>
+                                    </div>
+                                </div>
+                                <div className="mt-4">
+                                    <label className="block text-sm font-semibold mb-2">Velocidade do Robo</label>
+                                    <div className="flex items-center gap-4 bg-slate-50 p-4 rounded border border-slate-200">
+                                        <span className="text-xl">&#128034;</span>
+                                        <input
+                                            type="range" min="0.1" max="2.0" step="0.1"
+                                            value={(2.1 - speed).toFixed(1)}
+                                            onChange={(e) => setSpeed((2.1 - parseFloat(e.target.value)).toFixed(1))}
+                                            className="w-full"
+                                        />
+                                        <span className="text-xl">&#128640;</span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        Arraste para a direita para acelerar. Velocidade Equivalente: <strong>{(1 / speed).toFixed(1)}x</strong>
+                                    </p>
+                                </div>
+
+                                {(() => {
+                                    const isAnyTaskRunning = tasks.some(t => ['pending', 'processing_data', 'running_rpa', 'aguardando_login', 'aguardando_limite'].includes(t.status));
+                                    const disableExecute = isExecuting || isAnyTaskRunning;
+                                    return (
+                                    <button
+                                        onClick={handleExecute} disabled={disableExecute}
+                                        className={`w-full py-3 rounded-lg font-bold text-white mt-6 ${disableExecute ? 'bg-slate-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                                    >
+                                        {isExecuting ? 'Iniciando Robo...' : isAnyTaskRunning ? 'Uma automacao ja esta em andamento' : 'Iniciar Automacao'}
+                                    </button>
+                                    );
+                                })()}
+                            </div>
+                        )}
+
+                        {activeTab === 'history' && (
+                            <div className="bg-white rounded-xl shadow border p-6">
+                                <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-xl font-bold">Historico de Execucoes</h2>
+                                    <div className="flex gap-2">
+                                        {!showArchived && <button onClick={handleArchiveAll} className="text-sm bg-gray-200 hover:bg-gray-300 px-3 py-1 rounded">Arquivar Todos</button>}
+                                        <button onClick={() => setShowArchived(!showArchived)} className="text-sm bg-blue-100 text-blue-700 hover:bg-blue-200 px-3 py-1 rounded font-semibold">
+                                            {showArchived ? 'Ver Ativos' : 'Ver Arquivados'}
+                                        </button>
+                                    </div>
+                                </div>
+                                <table className="w-full text-left">
+                                    <thead>
+                                        <tr className="border-b">
+                                            <th className="p-2">Data</th>
+                                            <th className="p-2">Site</th>
+                                            <th className="p-2">Status</th>
+                                            <th className="p-2">CPFs</th>
+                                            <th className="p-2 text-right">Resultado</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {tasks.map(t => (
+                                            <tr key={t.id} className="border-b hover:bg-slate-50 transition-colors">
+                                                <td className="p-2 text-sm">{new Date(t.created_at + 'Z').toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}</td>
+                                                <td className="p-2">{t.plugin_name}</td>
+                                                <td className="p-2 font-medium">
+                                                    <span className={
+                                                        t.status === 'completed' ? 'text-green-600' :
+                                                        t.status === 'error' ? 'text-red-600' :
+                                                        t.status === 'aguardando_login' ? 'text-orange-600 bg-orange-100 px-2 py-1 rounded animate-pulse' :
+                                                        'text-blue-600'
+                                                    }>
+                                                        {t.status === 'aguardando_login' ? 'AGUARDANDO LOGIN' : t.status.toUpperCase()}
+                                                    </span>
+                                                    {t.status === 'error' && t.error_message && (
+                                                        <div className="text-xs text-red-500 mt-1 max-w-xs overflow-auto max-h-24 whitespace-pre-wrap font-mono bg-slate-50 p-1 border border-red-100">
+                                                            {t.error_message}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="p-2">
+                                                    {t.processed_cpfs} / {t.total_cpfs}
+                                                    {t.status === 'running_rpa' && t.current_item && (
+                                                        <div className="text-xs text-blue-500 mt-1 animate-pulse">
+                                                            {t.current_item}
+                                                        </div>
+                                                    )}
+                                                    {t.status === 'running_rpa' && t.processed_cpfs > 0 && (
+                                                        <div className="flex flex-col gap-1 mt-2 text-xs text-gray-600 bg-blue-50 p-1.5 rounded border border-blue-100">
+                                                            {(() => {
+                                                                const totalElapsedSec = (new Date() - new Date(t.created_at + 'Z')) / 1000;
+                                                                let waitSec = t.total_login_wait_seconds || 0;
+                                                                if (t.status === 'aguardando_login' && t.last_login_wait_start) {
+                                                                    waitSec += (new Date() - new Date(t.last_login_wait_start + 'Z')) / 1000;
+                                                                }
+                                                                const execSec = Math.max(1, totalElapsedSec - waitSec);
+                                                                const execMin = Math.max(0.1, execSec / 60);
+                                                                const rpm = (t.processed_cpfs / execMin).toFixed(1);
+                                                                const etaMin = Math.ceil((t.total_cpfs - t.processed_cpfs) / (t.processed_cpfs / execMin));
+
+                                                                const formatTime = (s) => `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+
+                                                                return (
+                                                                    <div>
+                                                                        <div title="Consultas por minuto">Velocidade: <strong>{rpm}</strong> / min</div>
+                                                                        <div title="Tempo estimado para conclusao">Previsao: <strong>{etaMin}</strong> min restantes</div>
+                                                                        <div className="mt-1 flex justify-between text-[10px] bg-white p-1 rounded border border-slate-200">
+                                                                            <span title="Tempo real do robo trabalhando">Trab: {formatTime(execSec)}</span>
+                                                                            <span title="Tempo gasto aguardando usuario logar">Esp: {formatTime(waitSec)}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })()}
+                                                            <div className="mt-2 pt-2 border-t border-blue-200">
+                                                                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                                                                    Ajustar Ritmo (Velocidade: {(1 / t.speed_multiplier).toFixed(1)}x)
+                                                                </label>
+                                                                <div className="flex items-center gap-1">
+                                                                    <span>&#128034;</span>
+                                                                    <input
+                                                                        type="range" min="0.1" max="2.0" step="0.1"
+                                                                        defaultValue={(2.1 - t.speed_multiplier).toFixed(1)}
+                                                                        onMouseUp={(e) => handleSpeedChange(t.id, (2.1 - parseFloat(e.target.value)).toFixed(1))}
+                                                                        className="w-full h-1"
+                                                                    />
+                                                                    <span>&#128640;</span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="p-2 text-right flex flex-col gap-1 items-end">
+                                                    {(t.status === 'running_rpa' || t.status === 'aguardando_login' || t.status === 'pending') && (
+                                                        <button onClick={() => handleCancelTask(t.id)} className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                            Cancelar Consulta
+                                                        </button>
+                                                    )}
+                                                    {(t.status === 'error' || t.status === 'canceled' || t.status === 'aguardando_login') && t.processed_cpfs < t.total_cpfs && (
+                                                        <button onClick={() => handleResumeTask(t.id)} className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                            Continuar/Retomar
+                                                        </button>
+                                                    )}
+                                                    {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && (
+                                                        <a href={`/outputs/${t.file_path_output.split('/').pop().split('\\\\').pop()}`} download className="bg-green-100 text-green-700 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                            {t.status === 'error' || t.status === 'canceled' ? 'Baixar Parcial' : 'Baixar Completo'}
+                                                        </a>
+                                                    )}
+                                                    {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && t.processed_cpfs < t.total_cpfs && (
+                                                        <a href={`/api/tasks/${t.id}/download_unprocessed`} download className="bg-orange-100 hover:bg-orange-200 text-orange-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
+                                                            Baixar Restantes
+                                                        </a>
+                                                    )}
+                                                    <button onClick={() => handleArchiveTask(t.id, !showArchived)} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold mt-1">
+                                                        {showArchived ? 'Desarquivar' : 'Arquivar'}
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

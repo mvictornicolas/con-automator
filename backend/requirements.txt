@@ -1,0 +1,10 @@
+fastapi[all]
+uvicorn
+pandas
+openpyxl
+sqlalchemy
+playwright
+playwright-stealth
+undetected-chromedriver
+python-multipart
+websockets
