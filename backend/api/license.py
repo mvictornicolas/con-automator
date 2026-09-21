@@ -20,6 +20,7 @@ LICENSE_FILE = os.path.abspath(os.path.join("..", "data", "license.key"))
 
 def get_hwid():
     """Obtem o UUID unico da placa mae/sistema do Windows."""
+    # 1. Tentar WMIC (Pode falhar no Win 11 novo pois foi descontinuado)
     try:
         output = subprocess.check_output('wmic csproduct get uuid', shell=True).decode()
         hwid = output.split('\n')[1].strip()
@@ -27,6 +28,26 @@ def get_hwid():
             return hwid
     except Exception:
         pass
+        
+    # 2. Tentar PowerShell Get-CimInstance (Substituto do WMIC no Win 11)
+    try:
+        output = subprocess.check_output('powershell -NoProfile -Command "(Get-CimInstance -Class Win32_ComputerSystemProduct).UUID"', shell=True).decode()
+        hwid = output.strip()
+        if hwid and hwid != "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF":
+            return hwid
+    except Exception:
+        pass
+        
+    # 3. Tentar MachineGuid do Registro (Sempre presente)
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            hwid, _ = winreg.QueryValueEx(key, "MachineGuid")
+            if hwid:
+                return hwid
+    except Exception:
+        pass
+
     return "UNKNOWN_HWID_FALLBACK"
 
 def load_saved_token():

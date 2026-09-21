@@ -1,0 +1,2 @@
+[PluginManager] Carregado plugin: site_consignet
+[PluginManager] Carregado plugin: site_consignet

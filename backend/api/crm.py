@@ -26,6 +26,7 @@ def clean_cpf(cpf: str) -> str:
 @router.post("/import")
 async def import_spreadsheets(
     convenio: str = Form(...),
+    force: str = Form("false"),
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db)
 ):
@@ -48,6 +49,25 @@ async def import_spreadsheets(
             
             # Normalizar colunas para maiusculo para facilitar busca do CPF/NOME
             df.columns = [str(c).strip().upper() for c in df.columns]
+            
+            if force.lower() != "true":
+                conv_col = None
+                for c in df.columns:
+                    if c in ["CONVENIO", "CONVÊNIO", "ORGAO", "ÓRGÃO", "ENTIDADE"]:
+                        conv_col = c
+                        break
+                
+                if conv_col:
+                    val_counts = df[conv_col].dropna().value_counts()
+                    if not val_counts.empty:
+                        detected_conv = str(val_counts.idxmax()).strip()
+                        # Se não for idêntico (case-insensitive)
+                        if detected_conv.lower() != convenio.strip().lower():
+                            from fastapi.responses import JSONResponse
+                            return JSONResponse(status_code=409, content={
+                                "detected": detected_conv,
+                                "message": f"Identificamos o convênio '{detected_conv}' na planilha, mas você informou '{convenio}'."
+                            })
             
             # Descobrir qual coluna é o CPF
             cpf_col = None

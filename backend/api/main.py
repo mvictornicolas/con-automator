@@ -14,6 +14,7 @@ from services.data_engine import DataEngine
 from fastapi.responses import JSONResponse
 import api.license as license_manager
 from api.crm import router as crm_router
+from api.updater import update_router
 
 # Cria tabelas se nÃ£o existirem
 Base.metadata.create_all(bind=engine)
@@ -21,6 +22,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="RPA Automator API")
 
 app.include_router(crm_router, prefix="/api/crm", tags=["CRM"])
+app.include_router(update_router)
 
 @app.middleware("http")
 async def check_license_middleware(request: Request, call_next):
@@ -80,7 +82,7 @@ def get_license_status():
     valid, payload_or_msg = license_manager.verify_token(token)
     
     if valid:
-        return {"status": "valid", "hwid": hwid, "expiration": payload_or_msg["exp"]}
+        return {"status": "valid", "hwid": hwid, "expiration": payload_or_msg["exp"], "tier": payload_or_msg.get("tier", "ultimate")}
     else:
         return {"status": "invalid", "hwid": hwid, "message": payload_or_msg}
 
@@ -98,7 +100,7 @@ def activate_license(data: LicenseInput):
             
         exp_date = datetime.fromisoformat(msg["exp"])
         days_left = (exp_date - datetime.now()).days
-        return {"status": "success", "message": f"Licença ativada com sucesso! Restam {days_left} dias de assinatura.", "expiration": msg["exp"], "days_left": days_left}
+        return {"status": "success", "message": f"Licença ativada com sucesso! Restam {days_left} dias de assinatura.", "expiration": msg["exp"], "days_left": days_left, "tier": msg.get("tier", "ultimate")}
     else:
         raise HTTPException(status_code=400, detail=msg)
 
@@ -182,34 +184,75 @@ def execute_rpa_task(task_id: int, plugin_name: str, file_content: bytes, filena
             if t and t.status == "canceled":
                 db_session.close()
                 raise Exception("CANCELADO_PELO_USUARIO")
+            if t and t.status == "paused":
+                db_session.close()
+                while True:
+                    time.sleep(1.0)
+                    db2 = SessionLocal()
+                    t2 = db2.query(TaskHistory).filter(TaskHistory.id == task_id).first()
+                    current_status = t2.status if t2 else "canceled"
+                    db2.close()
+                    if current_status == "canceled":
+                        raise Exception("CANCELADO_PELO_USUARIO")
+                    if current_status != "paused":
+                        break
+                db_session = SessionLocal()
+                t = db_session.query(TaskHistory).filter(TaskHistory.id == task_id).first()
+                
             speed_val = t.speed_multiplier if t and t.speed_multiplier else 1.0
             db_session.close()
             return speed_val
             
         def check_rate_limit_cb():
             db_session = SessionLocal()
+            
+            # Limite do usuario
             settings = db_session.query(GlobalSettings).first()
-            if not settings or settings.limit_cpfs <= 0:
-                db_session.close()
-                return 0
+            user_limit = settings.limit_cpfs if settings and settings.limit_cpfs > 0 else 0
+            user_hours = settings.limit_hours if settings and settings.limit_hours > 0 else 1
             
+            # Limite da licenca (24h)
+            token = license_manager.load_saved_token()
+            valid, payload = license_manager.verify_token(token)
+            tier = payload.get("tier", "ultimate") if (valid and isinstance(payload, dict)) else "basic"
+            
+            tier_limit = 0
+            if tier == "basic":
+                tier_limit = 400
+            elif tier == "medium":
+                tier_limit = 800
+                
             from datetime import timedelta
-            limit_time = datetime.utcnow() - timedelta(hours=settings.limit_hours)
             
-            db_session.query(QueryLog).filter(QueryLog.timestamp < limit_time).delete()
-            count = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time).count()
-            
-            if count >= settings.limit_cpfs:
-                oldest = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time).order_by(QueryLog.timestamp.asc()).first()
-                if oldest:
-                    target = oldest.timestamp + timedelta(hours=settings.limit_hours)
-                    wait_sec = (target - datetime.utcnow()).total_seconds()
-                    db_session.commit()
-                    db_session.close()
-                    return max(1, int(wait_sec))
+            # Limpar logs antigos (mais de 24h, para garantir que o tier limit funcione)
+            db_session.query(QueryLog).filter(QueryLog.timestamp < datetime.utcnow() - timedelta(hours=24)).delete()
             db_session.commit()
+            
+            wait_user = 0
+            wait_tier = 0
+            
+            # Verifica limite do usuario
+            if user_limit > 0:
+                limit_time_user = datetime.utcnow() - timedelta(hours=user_hours)
+                count_user = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time_user).count()
+                if count_user >= user_limit:
+                    oldest = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time_user).order_by(QueryLog.timestamp.asc()).first()
+                    if oldest:
+                        target = oldest.timestamp + timedelta(hours=user_hours)
+                        wait_user = max(1, int((target - datetime.utcnow()).total_seconds()))
+                        
+            # Verifica limite da licenca
+            if tier_limit > 0:
+                limit_time_tier = datetime.utcnow() - timedelta(hours=24)
+                count_tier = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time_tier).count()
+                if count_tier >= tier_limit:
+                    oldest = db_session.query(QueryLog).filter(QueryLog.timestamp >= limit_time_tier).order_by(QueryLog.timestamp.asc()).first()
+                    if oldest:
+                        target = oldest.timestamp + timedelta(hours=24)
+                        wait_tier = max(1, int((target - datetime.utcnow()).total_seconds()))
+
             db_session.close()
-            return 0
+            return max(wait_user, wait_tier)
             
         def register_query_cb():
             db_session = SessionLocal()
@@ -217,7 +260,8 @@ def execute_rpa_task(task_id: int, plugin_name: str, file_content: bytes, filena
             db_session.commit()
             db_session.close()
 
-        output_filename = f"resultado_{task_id}_{int(time.time())}.csv"
+        safe_conv = "".join([c if c.isalnum() else "_" for c in str(task.convenio)]) if task.convenio else task.plugin_name
+        output_filename = f"resultado_{safe_conv}_{task_id}_{int(time.time())}.csv"
         output_path = os.path.join("../data/outputs", output_filename)
         
         # Define output path early so UI can download partials
@@ -299,6 +343,15 @@ async def execute_task(
     # LÃª o conteÃºdo do arquivo
     content = await file.read()
     
+    # Cap de velocidade pela licenca
+    token = license_manager.load_saved_token()
+    valid, payload = license_manager.verify_token(token)
+    tier = payload.get("tier", "ultimate") if (valid and isinstance(payload, dict)) else "basic"
+    if tier == "basic":
+        speed = max(speed, 1.0)
+    elif tier == "medium":
+        speed = max(speed, 0.33)
+        
     # Salva o arquivo de input (opcional para histÃ³rico)
     input_path = os.path.join("../data/uploads", f"input_{int(time.time())}_{file.filename}")
     with open(input_path, "wb") as f:
@@ -332,8 +385,19 @@ class SpeedUpdate(BaseModel):
 def update_task_speed(task_id: int, speed_data: SpeedUpdate, db: Session = Depends(get_db)):
     task = db.query(TaskHistory).filter(TaskHistory.id == task_id).first()
     if not task:
-        raise HTTPException(status_code=404, detail="Tarefa nÃ£o encontrada")
-    task.speed_multiplier = speed_data.speed_multiplier
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+        
+    speed = speed_data.speed_multiplier
+    token = license_manager.load_saved_token()
+    valid, payload = license_manager.verify_token(token)
+    tier = payload.get("tier", "ultimate") if (valid and isinstance(payload, dict)) else "basic"
+    
+    if tier == "basic":
+        speed = max(speed, 1.0)
+    elif tier == "medium":
+        speed = max(speed, 0.33)
+        
+    task.speed_multiplier = speed
     db.commit()
     return {"status": "success", "speed": task.speed_multiplier}
 
@@ -396,8 +460,26 @@ def archive_task(task_id: int, archive: bool, db: Session = Depends(get_db)):
 def cancel_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(TaskHistory).filter(TaskHistory.id == task_id).first()
     if not task: raise HTTPException(404)
-    if task.status in ['running_rpa', 'aguardando_login', 'pending']:
+    if task.status in ['running_rpa', 'aguardando_login', 'pending', 'paused']:
         task.status = 'canceled'
+        db.commit()
+    return {'status': 'success'}
+
+@app.put('/api/tasks/{task_id}/pause')
+def pause_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(TaskHistory).filter(TaskHistory.id == task_id).first()
+    if not task: raise HTTPException(404)
+    if task.status in ['running_rpa', 'aguardando_login', 'pending']:
+        task.status = 'paused'
+        db.commit()
+    return {'status': 'success'}
+
+@app.put('/api/tasks/{task_id}/unpause')
+def unpause_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(TaskHistory).filter(TaskHistory.id == task_id).first()
+    if not task: raise HTTPException(404)
+    if task.status == 'paused':
+        task.status = 'running_rpa'
         db.commit()
     return {'status': 'success'}
 

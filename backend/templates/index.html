@@ -80,15 +80,31 @@
                 }
             }, [plugins]);
 
-            const handleImport = async () => {
-                if (!importFiles.length || !convenioInput) {
+            const handleImport = async (force = false, overrideConvenio = null) => {
+                const convToUse = overrideConvenio || convenioInput;
+                if (!importFiles.length || !convToUse) {
                     alert("Selecione os arquivos e digite um convenio."); return;
                 }
                 const fd = new FormData();
-                fd.append('convenio', convenioInput);
+                fd.append('convenio', convToUse);
+                fd.append('force', force ? 'true' : 'false');
                 for(let f of importFiles) fd.append('files', f);
                 
-                await fetch('/api/crm/import', { method: 'POST', body: fd });
+                const res = await fetch('/api/crm/import', { method: 'POST', body: fd });
+                
+                if (res.status === 409) {
+                    const data = await res.json();
+                    const novoConvenio = prompt(`${data.message}\n\nSe desejar corrigir, digite o nome correto abaixo e dê OK. Para cancelar a importação, clique em Cancelar:`, data.detected);
+                    if (novoConvenio !== null) {
+                        setConvenioInput(novoConvenio);
+                        return handleImport(true, novoConvenio);
+                    }
+                    return; // abort
+                } else if (!res.ok) {
+                    alert("Erro ao importar dados da planilha.");
+                    return;
+                }
+                
                 alert("Importado com sucesso!");
                 setImportFiles([]);
                 setConvenioInput('');
@@ -488,6 +504,11 @@
             };
             const [rateLimit, setRateLimit] = useState({ limit_cpfs: 0, limit_hours: 1.0, current_count: 0 });
             const [showLimitModal, setShowLimitModal] = useState(false);
+            const [showUpdateModal, setShowUpdateModal] = useState(false);
+            const [updateToken, setUpdateToken] = useState(localStorage.getItem('updateToken') || '');
+            const [updateStatus, setUpdateStatus] = useState(null); // null, 'checking', 'available', 'downloading', 'error'
+            const [updateData, setUpdateData] = useState(null);
+            
             const [licenseInfo, setLicenseInfo] = useState({ status: 'checking', hwid: '', message: '' });
             const [tokenInput, setTokenInput] = useState('');
 
@@ -585,6 +606,20 @@
                     fetchTasks();
                 } catch (err) { alert('Erro ao retomar tarefa.'); }
             };
+            
+            const handlePauseTask = async (taskId) => {
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/pause`, { method: 'PUT' });
+                    fetchTasks();
+                } catch (err) { console.error(err); }
+            };
+            
+            const handleUnpauseTask = async (taskId) => {
+                try {
+                    await fetch(`${API_URL}/tasks/${taskId}/unpause`, { method: 'PUT' });
+                    fetchTasks();
+                } catch (err) { console.error(err); }
+            };
 
             const handleImportToCrm = async (taskId, defaultConvenio) => {
                 const convenio = prompt("Confirmar o Convênio/Rótulo destes clientes:", defaultConvenio || "Histórico");
@@ -602,11 +637,25 @@
             };
 
             const saveRateLimit = async () => {
+                const tier = licenseInfo.tier || 'ultimate';
+                let maxTierLimit = 0;
+                if (tier === 'basic') maxTierLimit = 400;
+                if (tier === 'medium') maxTierLimit = 800;
+
+                let finalLimit = rateLimit.limit_cpfs;
+                if (maxTierLimit > 0) {
+                    if (finalLimit === 0 || finalLimit > maxTierLimit) {
+                        alert(`Atenção: O plano ${tier.toUpperCase()} permite no máximo ${maxTierLimit} consultas. O limite será ajustado para o máximo permitido.`);
+                        finalLimit = maxTierLimit;
+                        setRateLimit({...rateLimit, limit_cpfs: finalLimit});
+                    }
+                }
+                
                 try {
                     await fetch(`${API_URL}/settings/rate_limit`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ limit_cpfs: rateLimit.limit_cpfs, limit_hours: rateLimit.limit_hours })
+                        body: JSON.stringify({ limit_cpfs: finalLimit, limit_hours: rateLimit.limit_hours })
                     });
                     setShowLimitModal(false);
                     fetchRateLimit();
@@ -645,6 +694,50 @@
                     }
                 } catch (err) {
                     alert('Erro de conexao');
+                }
+            };
+
+            const checkForUpdate = async () => {
+                setUpdateStatus('checking');
+                if (updateToken) localStorage.setItem('updateToken', updateToken);
+                try {
+                    const res = await fetch(`${API_URL}/update/check`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ update_token: updateToken })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        setUpdateData(data);
+                        setUpdateStatus('available');
+                    } else {
+                        setUpdateStatus('error');
+                        alert(data.detail || "Erro ao verificar.");
+                    }
+                } catch (e) {
+                    setUpdateStatus('error');
+                    alert("Erro de conexão ao verificar atualização.");
+                }
+            };
+
+            const applyUpdate = async () => {
+                setUpdateStatus('downloading');
+                try {
+                    const res = await fetch(`${API_URL}/update/apply`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ update_token: updateToken, asset_url: updateData.asset_url })
+                    });
+                    if (res.ok) {
+                        alert("Download concluído! O sistema será reiniciado para aplicar a atualização.");
+                        // UI stays in downloading until it closes
+                    } else {
+                        const data = await res.json();
+                        alert(data.detail || "Erro ao baixar.");
+                        setUpdateStatus('error');
+                    }
+                } catch (e) {
+                    alert("Conexão perdida (provavelmente o sistema já está reiniciando).");
                 }
             };
 
@@ -746,11 +839,14 @@
                     <header className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between">
                         <h1 className="text-xl font-bold text-slate-800">RPA Automator</h1>
                         <div className="flex items-center gap-3">
+                            <button onClick={() => setShowUpdateModal(true)} className="bg-purple-100 hover:bg-purple-200 text-purple-700 px-3 py-1.5 rounded-lg border border-purple-200 text-xs font-bold transition-colors flex items-center gap-1">
+                                <span>&#8635;</span> Atualizar
+                            </button>
                             <div className="bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-xs flex items-center gap-2">
                                 <span className="text-slate-600 font-semibold">Assinatura:</span>
                                 {licenseInfo.expiration && (
                                     <span className={`${getDaysLeft() > 5 ? 'text-green-600' : 'text-red-600'} font-bold`} title={`Expira em: ${new Date(licenseInfo.expiration).toLocaleDateString('pt-BR')}`}>
-                                        {getDaysLeft()} dias
+                                        {getDaysLeft()} {getDaysLeft() === 1 ? 'dia' : 'dias'}
                                     </span>
                                 )}
                             </div>
@@ -773,18 +869,87 @@
                         </div>
                     </header>
 
+                    {showUpdateModal && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-lg w-full max-w-md shadow-xl">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-xl font-bold">Atualizar Sistema</h3>
+                                    <button onClick={() => setShowUpdateModal(false)} className="text-gray-500 hover:text-gray-800 text-xl font-bold">&times;</button>
+                                </div>
+                                <p className="text-sm text-slate-600 mb-4">
+                                    Basta clicar abaixo para checar por atualizações e baixar a versão mais recente do sistema automaticamente.
+                                </p>
+                                
+                                <details className="mb-4">
+                                    <summary className="text-xs text-blue-600 cursor-pointer font-semibold mb-2">Opções Avançadas (Trocar Token de Acesso)</summary>
+                                    <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+                                        <label className="block text-xs font-semibold mb-1">Código de Atualização Customizado (Opcional)</label>
+                                        <input 
+                                            type="password" 
+                                            className="w-full border p-2 rounded bg-white font-mono text-sm" 
+                                            placeholder="Deixe em branco para usar o padrão..."
+                                            value={updateToken} 
+                                            onChange={e => setUpdateToken(e.target.value)} 
+                                            disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+                                        />
+                                        <p className="text-[10px] text-gray-500 mt-1">Só preencha se o desenvolvedor enviar um novo código.</p>
+                                    </div>
+                                </details>
+
+                                {updateStatus === 'available' && updateData && (
+                                    <div className="bg-green-50 text-green-800 p-3 rounded mb-4 border border-green-200">
+                                        <p className="font-bold mb-1">✅ Atualização Encontrada!</p>
+                                        <p className="text-sm">Versão disponível: <strong>{updateData.latest_version}</strong></p>
+                                    </div>
+                                )}
+
+                                <div className="flex justify-end gap-2 mt-6">
+                                    {updateStatus === 'available' ? (
+                                        <button onClick={applyUpdate} className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white rounded font-bold transition-colors">
+                                            Baixar e Instalar Agora
+                                        </button>
+                                    ) : (
+                                        <button 
+                                            onClick={checkForUpdate} 
+                                            disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+                                            className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold transition-colors disabled:opacity-50"
+                                        >
+                                            {updateStatus === 'checking' ? 'Verificando...' : updateStatus === 'downloading' ? 'Baixando... Aguarde!' : 'Verificar Atualizações'}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {showLimitModal && (
                         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                            <div className="bg-white p-6 rounded-xl shadow-lg w-96">
+                            <div className="bg-white p-6 rounded-lg w-full max-w-sm shadow-xl">
                                 <h3 className="text-xl font-bold mb-4">Configurar Limites</h3>
-                                <div className="mb-4">
-                                    <label className="block text-sm font-semibold mb-1">Consultas Permitidas</label>
-                                    <input type="number" className="w-full border p-2 rounded" value={rateLimit.limit_cpfs} onChange={e => setRateLimit({...rateLimit, limit_cpfs: parseInt(e.target.value) || 0})} />
-                                    <p className="text-xs text-gray-500 mt-1">Deixe 0 para Ilimitado</p>
-                                </div>
+                                {(() => {
+                                    const tier = licenseInfo.tier || 'ultimate';
+                                    let maxTierLimit = 0;
+                                    if (tier === 'basic') maxTierLimit = 400;
+                                    if (tier === 'medium') maxTierLimit = 800;
+                                    
+                                    return (
+                                        <>
+                                            <div className="mb-4">
+                                                <label className="block text-sm font-semibold mb-1">Consultas Permitidas</label>
+                                                <input type="number" className="w-full border p-2 rounded" value={rateLimit.limit_cpfs} onChange={e => setRateLimit({...rateLimit, limit_cpfs: parseInt(e.target.value) || 0})} />
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    {maxTierLimit > 0 ? `Seu plano (${tier.toUpperCase()}) permite até ${maxTierLimit}.` : `Deixe 0 para Ilimitado`}
+                                                </p>
+                                            </div>
+                                        </>
+                                    );
+                                })()}
                                 <div className="mb-6">
                                     <label className="block text-sm font-semibold mb-1">A cada X horas (Janela)</label>
                                     <input type="number" step="0.5" className="w-full border p-2 rounded" value={rateLimit.limit_hours} onChange={e => setRateLimit({...rateLimit, limit_hours: parseFloat(e.target.value) || 1.0})} />
+                                    {licenseInfo.tier !== 'ultimate' && (
+                                        <p className="text-[10px] text-red-500 mt-1 font-semibold">Nota: Planos limitados são sempre validados usando uma janela fixa de 24 horas como teto máximo.</p>
+                                    )}
                                 </div>
                                 <div className="flex justify-end gap-2">
                                     <button onClick={() => setShowLimitModal(false)} className="px-4 py-2 bg-gray-200 rounded font-semibold">Cancelar</button>
@@ -861,20 +1026,36 @@
                                     </div>
                                 </div>
                                 <div className="mt-4">
-                                    <label className="block text-sm font-semibold mb-2">Velocidade do Robo</label>
-                                    <div className="flex items-center gap-4 bg-slate-50 p-4 rounded border border-slate-200">
-                                        <span className="text-xl">&#128034;</span>
-                                        <input
-                                            type="range" min="0.1" max="2.0" step="0.1"
-                                            value={(2.1 - speed).toFixed(1)}
-                                            onChange={(e) => setSpeed((2.1 - parseFloat(e.target.value)).toFixed(1))}
-                                            className="w-full"
-                                        />
-                                        <span className="text-xl">&#128640;</span>
-                                    </div>
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        Arraste para a direita para acelerar. Velocidade Equivalente: <strong>{(1 / speed).toFixed(1)}x</strong>
-                                    </p>
+                                    {(() => {
+                                        const tier = licenseInfo.tier || 'ultimate';
+                                        let sliderMax = "2.0";
+                                        let maxSpeedDisplay = "10.0x";
+                                        if (tier === 'basic') { sliderMax = "1.1"; maxSpeedDisplay = "1.0x"; }
+                                        else if (tier === 'medium') { sliderMax = "1.8"; maxSpeedDisplay = "3.3x"; }
+                                        
+                                        // Adjust current speed if it exceeds tier limits
+                                        if (tier === 'basic' && speed < 1.0) setSpeed("1.0");
+                                        else if (tier === 'medium' && speed < 0.3) setSpeed("0.3");
+
+                                        return (
+                                            <div className="mb-4">
+                                                <h3 className="text-sm font-bold mb-1">Velocidade da Automação (Seu Plano: {tier.toUpperCase()})</h3>
+                                                <div className="flex items-center gap-4 bg-slate-50 p-4 rounded border border-slate-200">
+                                                    <span className="text-xl">&#128034;</span>
+                                                    <input
+                                                        type="range" min="0.1" max={sliderMax} step="0.1"
+                                                        value={(2.1 - speed).toFixed(1)}
+                                                        onChange={(e) => setSpeed((2.1 - parseFloat(e.target.value)).toFixed(1))}
+                                                        className="w-full"
+                                                    />
+                                                    <span className="text-xl">&#128640;</span>
+                                                </div>
+                                                <p className="text-xs text-slate-500 mt-1">
+                                                    Arraste para a direita para acelerar (Máx: {maxSpeedDisplay}). Velocidade Equivalente: <strong>{(1 / speed).toFixed(1)}x</strong>
+                                                </p>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
 
                                 {(() => {
@@ -975,21 +1156,30 @@
                                                             })()}
                                                             <div className="mt-2 pt-2 border-t border-blue-200">
                                                                 {['running_rpa', 'aguardando_login', 'pending'].includes(t.status) ? (
-                                                                    <>
-                                                                        <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
-                                                                            Ajustar Ritmo (Velocidade: {(1 / t.speed_multiplier).toFixed(1)}x)
-                                                                        </label>
-                                                                        <div className="flex items-center gap-1">
-                                                                            <span>&#128034;</span>
-                                                                            <input
-                                                                                type="range" min="0.1" max="2.0" step="0.1"
-                                                                                defaultValue={(2.1 - t.speed_multiplier).toFixed(1)}
-                                                                                onMouseUp={(e) => handleSpeedChange(t.id, (2.1 - parseFloat(e.target.value)).toFixed(1))}
-                                                                                className="w-full h-1"
-                                                                            />
-                                                                            <span>&#128640;</span>
-                                                                        </div>
-                                                                    </>
+                                                                    (() => {
+                                                                        const tier = licenseInfo.tier || 'ultimate';
+                                                                        let sliderMax = "2.0";
+                                                                        if (tier === 'basic') sliderMax = "1.1";
+                                                                        else if (tier === 'medium') sliderMax = "1.8";
+                                                                        
+                                                                        return (
+                                                                            <>
+                                                                                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                                                                                    Ajustar Ritmo (Velocidade: {(1 / t.speed_multiplier).toFixed(1)}x)
+                                                                                </label>
+                                                                                <div className="flex items-center gap-1">
+                                                                                    <span>&#128034;</span>
+                                                                                    <input
+                                                                                        type="range" min="0.1" max={sliderMax} step="0.1"
+                                                                                        defaultValue={(2.1 - t.speed_multiplier).toFixed(1)}
+                                                                                        onMouseUp={(e) => handleSpeedChange(t.id, (2.1 - parseFloat(e.target.value)).toFixed(1))}
+                                                                                        className="w-full h-1"
+                                                                                    />
+                                                                                    <span>&#128640;</span>
+                                                                                </div>
+                                                                            </>
+                                                                        );
+                                                                    })()
                                                                 ) : (
                                                                     <div className="text-[10px] uppercase font-bold text-slate-500 text-center">
                                                                         Ritmo Final: {(1 / t.speed_multiplier).toFixed(1)}x
@@ -1001,13 +1191,28 @@
                                                 </td>
                                                 <td className="p-2 text-right flex flex-col gap-1 items-end">
                                                     {(t.status === 'running_rpa' || t.status === 'aguardando_login' || t.status === 'pending') && (
-                                                        <button onClick={() => handleCancelTask(t.id)} className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
-                                                            Cancelar Consulta
-                                                        </button>
+                                                        <div className="flex w-full max-w-[150px] gap-1">
+                                                            <button onClick={() => handlePauseTask(t.id)} className="flex-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 px-2 py-1 rounded text-center text-xs font-bold">
+                                                                Pausar
+                                                            </button>
+                                                            <button onClick={() => handleCancelTask(t.id)} className="flex-1 bg-red-100 hover:bg-red-200 text-red-800 px-2 py-1 rounded text-center text-xs font-bold">
+                                                                Cancelar
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    {t.status === 'paused' && (
+                                                        <div className="flex w-full max-w-[150px] gap-1">
+                                                            <button onClick={() => handleUnpauseTask(t.id)} className="flex-1 bg-green-100 hover:bg-green-200 text-green-800 px-2 py-1 rounded text-center text-xs font-bold">
+                                                                Continuar
+                                                            </button>
+                                                            <button onClick={() => handleCancelTask(t.id)} className="flex-1 bg-red-100 hover:bg-red-200 text-red-800 px-2 py-1 rounded text-center text-xs font-bold">
+                                                                Cancelar
+                                                            </button>
+                                                        </div>
                                                     )}
                                                     {(t.status === 'error' || t.status === 'canceled' || t.status === 'aguardando_login') && t.processed_cpfs < t.total_cpfs && (
                                                         <button onClick={() => handleResumeTask(t.id)} className="bg-blue-100 hover:bg-blue-200 text-blue-800 px-3 py-1 rounded text-center text-xs w-full max-w-[150px] font-bold">
-                                                            Continuar/Retomar
+                                                            Retomar Restantes
                                                         </button>
                                                     )}
                                                     {(t.status === 'completed' || t.status === 'error' || t.status === 'canceled') && t.file_path_output && (

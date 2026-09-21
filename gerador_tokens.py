@@ -11,14 +11,15 @@ def load_private_key():
 
 PRIVATE_KEY = load_private_key()
 
-def generate_token(hwid: str, days_valid: int):
+def generate_token(hwid: str, days_valid: int, tier: str = "ultimate"):
     # Calcula data de expiracao
     exp_date = datetime.now() + timedelta(days=days_valid)
     
     # Cria o payload em JSON
     payload = {
         "hwid": hwid.strip(),
-        "exp": exp_date.isoformat()
+        "exp": exp_date.isoformat(),
+        "tier": tier
     }
     payload_json = json.dumps(payload)
     
@@ -42,11 +43,25 @@ if __name__ == "__main__":
     hwid = input("Digite o Hardware ID (HWID) do cliente: ")
     days = input("Quantos dias de validade o token tera? (ex: 30): ")
     
+    print("\nNiveis de Assinatura:")
+    print("1 - Basic (Max 400 consultas/dia, 1.0x velocidade)")
+    print("2 - Medium (Max 800 consultas/dia, 3.0x velocidade)")
+    print("3 - Ultimate (Sem limites, velocidade liberada)")
+    tier_choice = input("Escolha o nivel (1/2/3) [Padrao: 3]: ").strip()
+    
+    if tier_choice == "1":
+        tier = "basic"
+    elif tier_choice == "2":
+        tier = "medium"
+    else:
+        tier = "ultimate"
+    
     try:
         days = int(days)
-        token, exp = generate_token(hwid, days)
+        token, exp = generate_token(hwid, days, tier)
         print("\n--- TOKEN GERADO COM SUCESSO ---")
         print(f"Valido ate: {exp.strftime('%d/%m/%Y %H:%M')}")
+        print(f"Nivel: {tier.upper()}")
         print(f"HWID Vinculado: {hwid}")
         print("\nCopie a linha abaixo e envie para o cliente:")
         print("--------------------------------------------------------------------------------")

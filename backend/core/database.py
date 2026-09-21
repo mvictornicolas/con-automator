@@ -2,10 +2,20 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
-DATABASE_URL = "sqlite:///../data/rpa_database.db"
+import sys
 
-# Garantir que o diretório data exista
-os.makedirs("../data", exist_ok=True)
+if getattr(sys, 'frozen', False):
+    # Se estiver rodando como .exe (compilado)
+    base_dir = os.path.dirname(sys.executable)
+else:
+    # Se estiver rodando via Python script
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+data_dir = os.path.join(base_dir, "data")
+os.makedirs(data_dir, exist_ok=True)
+
+db_path = os.path.join(data_dir, "rpa_database.db")
+DATABASE_URL = f"sqlite:///{db_path}"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
