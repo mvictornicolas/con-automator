@@ -95,7 +95,10 @@ def activate_license(data: LicenseInput):
         # Salva o token valido no arquivo
         with open(license_manager.LICENSE_FILE, "w") as f:
             f.write(data.token)
-        return {"status": "success", "message": "Licença ativada com sucesso!"}
+            
+        exp_date = datetime.fromisoformat(msg["exp"])
+        days_left = (exp_date - datetime.now()).days
+        return {"status": "success", "message": f"Licença ativada com sucesso! Restam {days_left} dias de assinatura.", "expiration": msg["exp"], "days_left": days_left}
     else:
         raise HTTPException(status_code=400, detail=msg)
 

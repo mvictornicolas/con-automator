@@ -15,7 +15,8 @@ SF8l5OtDXVzCHdnFvJtjUfFX8pgwdXHCkMN19eY3qYXt9MgBtYj7AgMBAAE=
 -----END RSA PUBLIC KEY-----"""
 
 PUBLIC_KEY = rsa.PublicKey.load_pkcs1(PUBLIC_KEY_PEM)
-LICENSE_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "license.key")
+# O banco de dados e arquivos de config ficam em "../data" relativo a execucao
+LICENSE_FILE = os.path.abspath(os.path.join("..", "data", "license.key"))
 
 def get_hwid():
     """Obtem o UUID unico da placa mae/sistema do Windows."""

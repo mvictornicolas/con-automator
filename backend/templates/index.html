@@ -638,7 +638,7 @@
                     });
                     const data = await res.json();
                     if (res.ok) {
-                        alert("Licenca ativada com sucesso!");
+                        alert(data.message || "Licença ativada com sucesso!");
                         window.location.reload();
                     } else {
                         alert(data.detail || 'Token invalido');
@@ -734,11 +734,26 @@
                     </div>
                 );
             }
+            const getDaysLeft = () => {
+                if (!licenseInfo.expiration) return null;
+                const diff = new Date(licenseInfo.expiration) - new Date();
+                const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+                return days > 0 ? days : 0;
+            };
+
             return (
                 <div className="min-h-screen flex flex-col">
                     <header className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between">
                         <h1 className="text-xl font-bold text-slate-800">RPA Automator</h1>
                         <div className="flex items-center gap-3">
+                            <div className="bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-xs flex items-center gap-2">
+                                <span className="text-slate-600 font-semibold">Assinatura:</span>
+                                {licenseInfo.expiration && (
+                                    <span className={`${getDaysLeft() > 5 ? 'text-green-600' : 'text-red-600'} font-bold`} title={`Expira em: ${new Date(licenseInfo.expiration).toLocaleDateString('pt-BR')}`}>
+                                        {getDaysLeft()} dias
+                                    </span>
+                                )}
+                            </div>
                             <div className="bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 text-xs flex items-center gap-2">
                                 <span className="text-slate-600 font-semibold">Limite:</span>
                                 {rateLimit.limit_cpfs === 0 ? (
